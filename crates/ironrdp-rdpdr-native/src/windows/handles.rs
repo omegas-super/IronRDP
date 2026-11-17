@@ -1150,6 +1150,48 @@ fn open_directory_with_access_and_options(
     desired_access: FILE_ACCESS_RIGHTS,
     create_options: u32,
 ) -> Result<HANDLE, OpenDirectoryError> {
+    // Windows Server 2019 (10.0.17763) reports the `\??\X:` volume symlink as a reparse
+    // point when `OBJ_DONT_REPARSE` is set, which fails every full-path open. Open the
+    // volume root first, then the remainder with `OBJ_DONT_REPARSE` relative to it: the
+    // symlink is the only way to name the volume, and junctions inside the remainder
+    // stay untraversed.
+    if root_directory.is_invalid() && nt_path_is_drive_qualified(name) && name.len() > NT_VOLUME_ROOT_PREFIX_LEN {
+        let mut volume_root = name[..NT_VOLUME_ROOT_PREFIX_LEN].to_vec();
+        let volume_handle = open_directory_once(
+            HANDLE::default(),
+            &mut volume_root,
+            DIRECTORY_TRAVERSAL_ACCESS,
+            SYNCHRONOUS_DIRECTORY_CREATE_OPTIONS,
+            OBJ_CASE_INSENSITIVE,
+        )?;
+        let mut remainder = name[NT_VOLUME_ROOT_PREFIX_LEN..].to_vec();
+        let result = open_directory_once(
+            volume_handle,
+            &mut remainder,
+            desired_access,
+            create_options,
+            OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        );
+        // SAFETY: the volume handle is owned by this call and only used for the open above.
+        let _ = unsafe { CloseHandle(volume_handle) };
+        return result;
+    }
+
+    let attributes = if root_directory.is_invalid() && nt_path_is_volume_root(name) {
+        OBJ_CASE_INSENSITIVE
+    } else {
+        OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+    };
+    open_directory_once(root_directory, name, desired_access, create_options, attributes)
+}
+
+fn open_directory_once(
+    root_directory: HANDLE,
+    name: &mut [u16],
+    desired_access: FILE_ACCESS_RIGHTS,
+    create_options: u32,
+    attributes: OBJECT_ATTRIBUTE_FLAGS,
+) -> Result<HANDLE, OpenDirectoryError> {
     let name_byte_len = name
         .len()
         .checked_mul(size_of::<u16>())
@@ -1164,7 +1206,7 @@ fn open_directory_with_access_and_options(
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("OBJECT_ATTRIBUTES size fits in u32"),
         RootDirectory: root_directory,
         ObjectName: core::ptr::addr_of_mut!(unicode_name),
-        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        Attributes: attributes,
         SecurityDescriptor: core::ptr::null(),
         SecurityQualityOfService: core::ptr::null(),
     };
@@ -1197,11 +1239,52 @@ fn open_directory_with_access_and_options(
     Ok(handle)
 }
 
+/// Byte length of the `\??\X:\` prefix that names a volume root.
+const NT_VOLUME_ROOT_PREFIX_LEN: usize = 7;
+
+/// Whether `name` is a full native path rooted at a logical volume (`\??\C:\...`).
+fn nt_path_is_drive_qualified(name: &[u16]) -> bool {
+    name.len() >= NT_VOLUME_ROOT_PREFIX_LEN
+        && name[0] == u16::from(b'\\')
+        && name[1] == u16::from(b'?')
+        && name[2] == u16::from(b'?')
+        && name[3] == u16::from(b'\\')
+        && name[5] == u16::from(b':')
+        && name[6] == u16::from(b'\\')
+}
+
+/// Whether `name` is exactly a volume root (`\??\C:\`).
+fn nt_path_is_volume_root(name: &[u16]) -> bool {
+    name.len() == NT_VOLUME_ROOT_PREFIX_LEN && nt_path_is_drive_qualified(name)
+}
+
 fn open_file(
     root_directory: HANDLE,
     name: &mut [u16],
     options: FileOpenOptions,
 ) -> Result<(FileHandle, usize), OpenFileError> {
+    // Windows Server 2019 (10.0.17763) reports the `\??\X:` volume symlink as a reparse
+    // point when `OBJ_DONT_REPARSE` is set, which fails every full-path open. Open the
+    // volume root first, then the remainder with `OBJ_DONT_REPARSE` relative to it: the
+    // symlink is the only way to name the volume, and junctions inside the remainder
+    // stay untraversed.
+    if root_directory.is_invalid() && nt_path_is_drive_qualified(name) && name.len() > NT_VOLUME_ROOT_PREFIX_LEN {
+        let mut volume_root = name[..NT_VOLUME_ROOT_PREFIX_LEN].to_vec();
+        let volume_handle = open_directory_once(
+            HANDLE::default(),
+            &mut volume_root,
+            DIRECTORY_TRAVERSAL_ACCESS,
+            SYNCHRONOUS_DIRECTORY_CREATE_OPTIONS,
+            OBJ_CASE_INSENSITIVE,
+        )
+        .map_err(OpenFileError::Directory)?;
+        let mut remainder = name[NT_VOLUME_ROOT_PREFIX_LEN..].to_vec();
+        let result = open_file(volume_handle, &mut remainder, options);
+        // SAFETY: the volume handle is owned by this call and only used for the open above.
+        let _ = unsafe { CloseHandle(volume_handle) };
+        return result;
+    }
+
     let name_byte_len = name
         .len()
         .checked_mul(size_of::<u16>())
@@ -1218,7 +1301,11 @@ fn open_file(
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("OBJECT_ATTRIBUTES size fits in u32"),
         RootDirectory: root_directory,
         ObjectName: core::ptr::addr_of_mut!(unicode_name),
-        Attributes: final_file_object_attributes(options.create_options),
+        Attributes: if root_directory.is_invalid() && nt_path_is_volume_root(name) {
+            OBJ_CASE_INSENSITIVE
+        } else {
+            final_file_object_attributes(options.create_options)
+        },
         SecurityDescriptor: core::ptr::null(),
         SecurityQualityOfService: core::ptr::null(),
     };
