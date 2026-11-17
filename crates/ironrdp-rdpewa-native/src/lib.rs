@@ -6,11 +6,15 @@
 //! Windows WebAuthn backend for [`ironrdp_rdpewa`].
 
 #[cfg(windows)]
+mod api;
+#[cfg(windows)]
 mod backend;
 #[cfg(windows)]
 mod cbor_map;
 #[cfg(windows)]
 mod ctap;
 
+#[cfg(windows)]
+pub use api::is_supported as is_webauthn_supported;
 #[cfg(windows)]
 pub use backend::{WindowsRdpewaBackend, WindowsRdpewaSessionState};

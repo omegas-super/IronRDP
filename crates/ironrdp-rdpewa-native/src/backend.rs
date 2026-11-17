@@ -18,23 +18,24 @@ use windows::Win32::Networking::WindowsWebServices::{
     WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS, WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS_CURRENT_VERSION,
     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS, WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_CURRENT_VERSION,
     WEBAUTHN_CLIENT_DATA, WEBAUTHN_CLIENT_DATA_CURRENT_VERSION, WEBAUTHN_COSE_CREDENTIAL_PARAMETER,
-    WEBAUTHN_COSE_CREDENTIAL_PARAMETER_CURRENT_VERSION, WEBAUTHN_COSE_CREDENTIAL_PARAMETERS, WEBAUTHN_CREDENTIAL_EX,
-    WEBAUTHN_CREDENTIAL_EX_CURRENT_VERSION, WEBAUTHN_CREDENTIAL_LIST, WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY,
-    WEBAUTHN_HASH_ALGORITHM_SHA_256, WEBAUTHN_RP_ENTITY_INFORMATION, WEBAUTHN_RP_ENTITY_INFORMATION_CURRENT_VERSION,
-    WEBAUTHN_USER_ENTITY_INFORMATION, WEBAUTHN_USER_ENTITY_INFORMATION_CURRENT_VERSION,
-    WEBAUTHN_USER_VERIFICATION_REQUIREMENT_ANY, WEBAUTHN_USER_VERIFICATION_REQUIREMENT_DISCOURAGED,
-    WEBAUTHN_USER_VERIFICATION_REQUIREMENT_PREFERRED, WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
-    WebAuthNAuthenticatorGetAssertion, WebAuthNAuthenticatorMakeCredential, WebAuthNCancelCurrentOperation,
-    WebAuthNFreeAssertion, WebAuthNFreeCredentialAttestation, WebAuthNGetApiVersionNumber, WebAuthNGetCancellationId,
-    WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable,
+    WEBAUTHN_COSE_CREDENTIAL_PARAMETER_CURRENT_VERSION, WEBAUTHN_COSE_CREDENTIAL_PARAMETERS,
+    WEBAUTHN_CREDENTIAL_ATTESTATION, WEBAUTHN_CREDENTIAL_EX, WEBAUTHN_CREDENTIAL_EX_CURRENT_VERSION,
+    WEBAUTHN_CREDENTIAL_LIST, WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY, WEBAUTHN_HASH_ALGORITHM_SHA_256,
+    WEBAUTHN_RP_ENTITY_INFORMATION, WEBAUTHN_RP_ENTITY_INFORMATION_CURRENT_VERSION, WEBAUTHN_USER_ENTITY_INFORMATION,
+    WEBAUTHN_USER_ENTITY_INFORMATION_CURRENT_VERSION, WEBAUTHN_USER_VERIFICATION_REQUIREMENT_ANY,
+    WEBAUTHN_USER_VERIFICATION_REQUIREMENT_DISCOURAGED, WEBAUTHN_USER_VERIFICATION_REQUIREMENT_PREFERRED,
+    WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-use windows::core::{GUID, HRESULT, PCWSTR};
+use windows::core::{BOOL, GUID, HRESULT, PCWSTR};
 
+use crate::api;
 use crate::ctap::{
     encode_get_assertion_response, encode_make_credential_response, pack_ctap_response, parse_get_assertion,
     parse_make_credential,
 };
+
+const WEBAUTHN_UNSUPPORTED: &str = "the Windows WebAuthn API is not available on this version of Windows";
 
 /// Per-session state shared by all recreated `WebAuthN_Channel` backends.
 #[derive(Debug, Default)]
@@ -72,8 +73,11 @@ impl WindowsRdpewaSessionState {
         }
 
         info!("Cancelling in-flight WebAuthn operation");
-        unsafe { WebAuthNCancelCurrentOperation(&requested) }
-            .map_err(|e| hresult_err(e.code(), "WebAuthNCancelCurrentOperation failed"))?;
+        if let Some(api) = api::api() {
+            unsafe { (api.cancel_current_operation)(&requested) }
+                .ok()
+                .map_err(|e| hresult_err(e.code(), "WebAuthNCancelCurrentOperation failed"))?;
+        }
         self.finish(requested);
         Ok(())
     }
@@ -124,7 +128,10 @@ impl WindowsRdpewaBackend {
 
 impl RdpewaClientHandler for WindowsRdpewaBackend {
     fn api_version(&mut self) -> RdpewaResult<u32> {
-        let version = unsafe { WebAuthNGetApiVersionNumber() };
+        let Some(api) = api::api() else {
+            return Err(RdpewaHandlerError::not_impl(WEBAUTHN_UNSUPPORTED));
+        };
+        let version = unsafe { (api.get_api_version_number)() };
         debug!(version, "WebAuthNGetApiVersionNumber");
         if version == 0 {
             Err(RdpewaHandlerError::fail("WebAuthn API unavailable"))
@@ -134,7 +141,12 @@ impl RdpewaClientHandler for WindowsRdpewaBackend {
     }
 
     fn is_uvpaa(&mut self) -> RdpewaResult<bool> {
-        let available = unsafe { WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable() }
+        let Some(api) = api::api() else {
+            return Ok(false);
+        };
+        let mut available = BOOL::from(false);
+        unsafe { (api.is_uvpaa)(&mut available) }
+            .ok()
             .map_err(|e| hresult_err(e.code(), "IsUserVerifyingPlatformAuthenticatorAvailable failed"))?;
         Ok(available.as_bool())
     }
@@ -148,6 +160,9 @@ impl RdpewaClientHandler for WindowsRdpewaBackend {
         request: WebAuthnOperationRequest,
         mut reply: RdpewaResponseSender,
     ) -> RdpewaResult<WebAuthnDispatch> {
+        if api::api().is_none() {
+            return Err(RdpewaHandlerError::not_impl(WEBAUTHN_UNSUPPORTED));
+        }
         let parent_hwnd = self.parent_hwnd;
         let session_state = Arc::clone(&self.session_state);
         let cancellation_id = cancellation_id_for_request(&request)?;
@@ -297,17 +312,24 @@ fn run_make_credential(
         ..Default::default()
     };
 
+    let Some(api) = api::api() else {
+        return Err(RdpewaHandlerError::not_impl(WEBAUTHN_UNSUPPORTED));
+    };
+
     info!(%rp_id, "WebAuthNAuthenticatorMakeCredential");
-    let attestation = unsafe {
-        WebAuthNAuthenticatorMakeCredential(
+    let mut attestation: *mut WEBAUTHN_CREDENTIAL_ATTESTATION = core::ptr::null_mut();
+    unsafe {
+        (api.make_credential)(
             hwnd,
             &rp_info,
             &user_info,
             &cose,
             &client_data,
-            Some(&raw const options),
+            &raw const options,
+            &mut attestation,
         )
     }
+    .ok()
     .map_err(|e| map_webauthn_error(e.code()))?;
 
     if attestation.is_null() {
@@ -315,7 +337,7 @@ fn run_make_credential(
     }
 
     let result = unsafe { read_make_credential_result(attestation) };
-    unsafe { WebAuthNFreeCredentialAttestation(Some(attestation)) };
+    unsafe { (api.free_credential_attestation)(attestation) };
     // Keep options/cancellation_id alive until after the API returns.
     let _ = &mut options;
     result
@@ -361,10 +383,22 @@ fn run_get_assertion(
         ..Default::default()
     };
 
+    let Some(api) = api::api() else {
+        return Err(RdpewaHandlerError::not_impl(WEBAUTHN_UNSUPPORTED));
+    };
+
     info!(%rp_id, "WebAuthNAuthenticatorGetAssertion");
-    let assertion = unsafe {
-        WebAuthNAuthenticatorGetAssertion(hwnd, PCWSTR(rp_id_w.as_ptr()), &client_data, Some(&raw const options))
+    let mut assertion: *mut WEBAUTHN_ASSERTION = core::ptr::null_mut();
+    unsafe {
+        (api.get_assertion)(
+            hwnd,
+            PCWSTR(rp_id_w.as_ptr()),
+            &client_data,
+            &raw const options,
+            &mut assertion,
+        )
     }
+    .ok()
     .map_err(|e| map_webauthn_error(e.code()))?;
 
     if assertion.is_null() {
@@ -372,13 +406,13 @@ fn run_get_assertion(
     }
 
     let result = unsafe { read_get_assertion_result(assertion) };
-    unsafe { WebAuthNFreeAssertion(assertion) };
+    unsafe { (api.free_assertion)(assertion) };
     let _ = &mut options;
     result
 }
 
 unsafe fn read_make_credential_result(
-    attestation: *mut windows::Win32::Networking::WindowsWebServices::WEBAUTHN_CREDENTIAL_ATTESTATION,
+    attestation: *mut WEBAUTHN_CREDENTIAL_ATTESTATION,
 ) -> RdpewaResult<WebAuthnOperationResponse> {
     let att = unsafe { &*attestation };
     let fmt = unsafe { pcwstr_to_string(att.pwszFormatType) }.unwrap_or_else(|| String::from("none"));
@@ -541,8 +575,16 @@ fn cancellation_id_for_request(request: &WebAuthnOperationRequest) -> RdpewaResu
     match request.para.cancellation_id.as_deref() {
         Some(cancellation_id) => guid_from_bytes(cancellation_id)
             .ok_or_else(|| RdpewaHandlerError::new(E_INVALIDARG, "invalid WebAuthn cancellation ID")),
-        None => unsafe { WebAuthNGetCancellationId() }
-            .map_err(|e| hresult_err(e.code(), "WebAuthNGetCancellationId failed")),
+        None => {
+            let Some(api) = api::api() else {
+                return Err(RdpewaHandlerError::not_impl(WEBAUTHN_UNSUPPORTED));
+            };
+            let mut cancellation_id = GUID::default();
+            unsafe { (api.get_cancellation_id)(&mut cancellation_id) }
+                .ok()
+                .map_err(|e| hresult_err(e.code(), "WebAuthNGetCancellationId failed"))?;
+            Ok(cancellation_id)
+        }
     }
 }
 

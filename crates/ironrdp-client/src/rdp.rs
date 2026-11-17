@@ -2707,6 +2707,11 @@ fn build_connector(
         if !webauthn_com_loaded {
             let sender = input_sender.clone();
             let parent_hwnd = config.webauthn_parent_hwnd.unwrap_or(0);
+            if !ironrdp_rdpewa_native::is_webauthn_supported() {
+                warn!(
+                    "Native WebAuthn redirection is unavailable on this version of Windows; WebAuthN_Channel requests will be declined"
+                );
+            }
             info!(parent_hwnd, "Registering native RDPEWA WebAuthn channel listener");
             let write_callback = Arc::new(move |channel_id, messages| {
                 sender
