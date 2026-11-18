@@ -3168,7 +3168,7 @@ async fn bootstrap_udp_transport(
 pub(crate) type ConnectOutput = (ConnectionOutcome, UpgradedFramed, UdpTunnel);
 
 /// Opens a TCP connection, abandoning each resolved address after `attempt_timeout`.
-async fn connect_tcp(dest: &str, attempt_timeout: Option<Duration>) -> io::Result<TcpStream> {
+pub(crate) async fn connect_tcp(dest: &str, attempt_timeout: Option<Duration>) -> io::Result<TcpStream> {
     let Some(attempt_timeout) = attempt_timeout else {
         return TcpStream::connect(dest).await;
     };
