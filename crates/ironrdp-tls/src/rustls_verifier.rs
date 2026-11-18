@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -43,11 +43,9 @@ fn server_cert_verifier(
     }
 
     let verifier: Arc<dyn ServerCertVerifier> = match certificate_validation {
-        CertificateValidation::Strict => {
-            rustls::client::WebPkiServerVerifier::builder(Arc::new(platform_root_certificates()?))
-                .build()
-                .map_err(io::Error::other)?
-        }
+        CertificateValidation::Strict => rustls::client::WebPkiServerVerifier::builder(platform_root_certificates()?)
+            .build()
+            .map_err(io::Error::other)?,
         CertificateValidation::DangerouslyAcceptInvalidCertificate => Arc::new(NoCertificateVerification),
     };
 
@@ -61,17 +59,27 @@ fn server_cert_verifier(
     })
 }
 
-fn platform_root_certificates() -> io::Result<rustls::RootCertStore> {
-    let native_certificates = rustls_native_certs::load_native_certs();
-    let mut roots = rustls::RootCertStore::empty();
-    let (added, _) = roots.add_parsable_certificates(native_certificates.certs);
-    if added == 0 {
-        return Err(io::Error::other(
-            "the platform certificate store contains no usable roots",
-        ));
-    }
+/// Returns the platform trust anchors, loading them once per process.
+///
+/// Loading enumerates the whole Windows ROOT store and parses every certificate, which is
+/// measurable work to repeat on each connect (and on every reconnect) before the TLS
+/// ClientHello. The set is stable for the process lifetime, so it is cached.
+fn platform_root_certificates() -> io::Result<Arc<rustls::RootCertStore>> {
+    static ROOTS: OnceLock<Result<Arc<rustls::RootCertStore>, String>> = OnceLock::new();
 
-    Ok(roots)
+    match ROOTS.get_or_init(|| {
+        let native_certificates = rustls_native_certs::load_native_certs();
+        let mut roots = rustls::RootCertStore::empty();
+        let (added, _) = roots.add_parsable_certificates(native_certificates.certs);
+        if added == 0 {
+            return Err(String::from("the platform certificate store contains no usable roots"));
+        }
+
+        Ok(Arc::new(roots))
+    }) {
+        Ok(roots) => Ok(Arc::clone(roots)),
+        Err(message) => Err(io::Error::other(message.clone())),
+    }
 }
 
 struct CallbackVerifier {
