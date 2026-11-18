@@ -1,0 +1,37 @@
+name: Optimized build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build optimized binaries (windows-x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        uses: ./.github/actions/install-build-deps
+
+      # Same codegen settings as the local build script, but with the portable
+      # x86-64-v3 baseline instead of -C target-cpu=native so the artifacts run
+      # on any modern x64 machine, including the GitHub runner that built them.
+      - name: Build
+        shell: bash
+        env:
+          CARGO_PROFILE_PRODUCTION_CODEGEN_UNITS: 1
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: cargo build -p ironrdp-agent -p ironrdp-viewer --profile production --locked
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironrdp-optimized-windows-x64
+          path: |
+            target/production/ironrdp-agent.exe
+            target/production/ironrdp-viewer.exe
+          if-no-files-found: error
