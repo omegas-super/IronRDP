@@ -3199,6 +3199,13 @@ async fn connect_direct(
     auto_reconnect_cookie: Option<&ServerAutoReconnect>,
 ) -> ConnectorResult<ConnectOutput> {
     let stream = tcp_connect_destination(config).await?;
+    // Nagle would delay the back-to-back small PDUs of the connection sequence and every
+    // interactive input event behind the peer's delayed ACK; the gateway and AVD transports
+    // already disable it for the same reason. Best effort: a failed setsockopt must not
+    // abort the connection.
+    if let Err(error) = stream.set_nodelay(true) {
+        warn!(%error, "Failed to enable TCP_NODELAY on the RDP socket");
+    }
     #[cfg(feature = "vmconnect")]
     let pcb_deadline = tokio::time::Instant::now() + ironrdp_vmconnect::PCB_TRANSMIT_DEADLINE;
     let client_addr = stream
