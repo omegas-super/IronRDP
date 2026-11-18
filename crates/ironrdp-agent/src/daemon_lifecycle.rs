@@ -42,6 +42,7 @@ impl Settings {
     }
 
     pub(crate) async fn run(self, endpoint: Endpoint) -> anyhow::Result<()> {
+        crate::performance::apply();
         let (overlay, options) = self.into_parts();
         ironrdp_daemon::daemon::run(endpoint, overlay, options).await
     }
@@ -56,6 +57,7 @@ impl Settings {
     pub(crate) async fn run_child(endpoint: Endpoint, bootstrap: String) -> anyhow::Result<()> {
         use std::io::{Seek as _, Write as _};
 
+        crate::performance::apply();
         let mut log = open_log(&log_path()?)?;
         let result = async {
             let (settings, mut stream) = Settings::read_bootstrap(bootstrap).await?;
