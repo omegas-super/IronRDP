@@ -70,6 +70,8 @@ enum Command {
     },
     /// Open an RDP session from a .rdp file and/or CLI overrides.
     Connect(ConnectArgs),
+    /// Verify a username and password against an RDP server without opening a session.
+    AuthCheck(AuthCheckArgs),
     /// Forward TCP through an RD Gateway tunnel without an RDP session: a fixed local
     /// port forward (SSH `-L`-style) or a SOCKS5 proxy a generic program can use.
     GwForward(GwForwardArgs),
@@ -610,6 +612,26 @@ enum RemoteGuardArg {
     Kerberos,
 }
 
+/// Arguments for the credential-only check subcommand.
+#[derive(Args, Debug)]
+pub(crate) struct AuthCheckArgs {
+    /// RDP server address (host[:port]); the port defaults to 3389.
+    #[arg(long, value_name = "SERVER", env = "RDP_HOSTNAME")]
+    pub(crate) server: String,
+    /// RDP account user name.
+    #[arg(short = 'u', long, env = "RDP_USERNAME")]
+    pub(crate) username: String,
+    /// RDP account password.
+    #[arg(short = 'p', long, env = "RDP_PASSWORD", hide_env_values = true)]
+    pub(crate) password: String,
+    /// RDP account domain.
+    #[arg(short = 'd', long)]
+    pub(crate) domain: Option<String>,
+    /// Accept any server certificate (development and testing only).
+    #[arg(long)]
+    pub(crate) skip_certificate_check: bool,
+}
+
 #[derive(Args, Debug)]
 struct ConnectArgs {
     /// Path to a .rdp file to read the base configuration from.
@@ -1085,6 +1107,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 
     let request = match command {
+        Command::AuthCheck(args) => {
+            return crate::auth_check::run_auth_check(args).await;
+        }
         Command::Daemon(command) => {
             if cli.backend != Backend::Daemon {
                 anyhow::bail!("daemon commands require --backend daemon");

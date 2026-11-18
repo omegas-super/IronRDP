@@ -7,6 +7,7 @@
 pub mod cli;
 
 pub(crate) mod attach;
+pub(crate) mod auth_check;
 pub(crate) mod daemon_lifecycle;
 pub(crate) mod gw_forward;
 pub(crate) mod help;

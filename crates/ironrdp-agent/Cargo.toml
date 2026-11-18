@@ -28,7 +28,9 @@ ironrdp-propertyset = { path = "../ironrdp-propertyset", version = "0.1" }
 ironrdp-cfg = { path = "../ironrdp-cfg", version = "0.3" }
 ironrdp-rdpfile = { path = "../ironrdp-rdpfile", version = "0.1" }
 ironrdp-input = { path = "../ironrdp-input", version = "0.9" }
+ironrdp-client = { path = "../ironrdp-client", version = "0.1", features = ["rustls"] }
 ironrdp-daemon = { path = "../ironrdp-daemon", version = "0.1" }
+ironrdp-tls = { path = "../ironrdp-tls", version = "0.3" }
 ironrdp-rpc = { path = "../ironrdp-rpc", version = "0.2" }
 ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.11" }
 
