@@ -111,7 +111,7 @@ On elevated Windows, a bulk run widens the dynamic TCP port range to 10,000 thro
 
 TLS validation is strict by default and consults the pinned known-certificates store. `--skip-certificate-check` accepts any certificate, is vulnerable to on-path attacks, and is intended only for explicitly authorized test fleets. Prefer `cert trust` with an out-of-band-verified fingerprint.
 
-`--dry-run` prints the normalized and shuffled plan without connecting. `--seed` makes the order reproducible, `--no-shuffle` keeps input order, `--progress` reports throughput every five seconds on stderr, and `--quiet` suppresses per-result lines.
+`--dry-run` prints the normalized and shuffled plan without connecting. `--seed` makes the order reproducible, `--no-shuffle` keeps input order, `--progress` reports throughput and ETA every five seconds on stderr, and `--quiet` suppresses per-result lines.
 
 ## Experimental Remote Credential Guard
 
