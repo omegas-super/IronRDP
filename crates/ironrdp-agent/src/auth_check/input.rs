@@ -14,6 +14,8 @@ use crate::cli::InputFormat;
 /// One credential check to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckTarget {
+    /// Position in the original input, preserved through shuffling for result event `index`.
+    pub(crate) input_index: usize,
     /// Server as canonical `host:port` (`[v6]:port` for IPv6).
     pub(crate) server: String,
     pub(crate) username: String,
@@ -102,6 +104,7 @@ pub(crate) fn parse_records(text: &str, format: InputFormat) -> anyhow::Result<V
             }
             InputFormat::Jsonl => match serde_json::from_str::<JsonRecord>(line) {
                 Ok(record) => Ok(Some(CheckTarget {
+                    input_index: 0,
                     server: record.server,
                     username: record.username,
                     password: record.password,
@@ -145,6 +148,7 @@ fn parse_txt_line(line: &str) -> Result<Option<CheckTarget>, String> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     match fields.as_slice() {
         [server, username, password] => Ok(Some(CheckTarget {
+            input_index: 0,
             server: (*server).to_owned(),
             username: (*username).to_owned(),
             password: (*password).to_owned(),
@@ -160,12 +164,14 @@ fn parse_txt_line(line: &str) -> Result<Option<CheckTarget>, String> {
 fn parse_fields(fields: &[String], format: &str) -> Result<Option<CheckTarget>, String> {
     match fields {
         [server, username, password] => Ok(Some(CheckTarget {
+            input_index: 0,
             server: server.clone(),
             username: username.clone(),
             password: password.clone(),
             domain: None,
         })),
         [server, username, password, domain] => Ok(Some(CheckTarget {
+            input_index: 0,
             server: server.clone(),
             username: username.clone(),
             password: password.clone(),
@@ -184,15 +190,28 @@ fn split_csv_line(line: &str) -> Result<Vec<String>, String> {
     let mut current = String::new();
     let mut chars = line.chars().peekable();
     let mut in_quotes = false;
+    let mut quote_just_closed = false;
 
     while let Some(character) = chars.next() {
         match character {
+            _ if quote_just_closed => {
+                if !in_quotes && character != ',' {
+                    return Err(String::from("unexpected character after a closing quote"));
+                }
+                quote_just_closed = false;
+                if character == ',' {
+                    fields.push(core::mem::take(&mut current));
+                } else {
+                    current.push(character);
+                }
+            }
             '"' if in_quotes => {
                 if chars.peek() == Some(&'"') {
                     chars.next();
                     current.push('"');
                 } else {
                     in_quotes = false;
+                    quote_just_closed = true;
                 }
             }
             '"' => {
@@ -248,8 +267,8 @@ pub(crate) fn parse_lists(
     passwords_text: &str,
 ) -> anyhow::Result<Vec<CheckTarget>> {
     let hosts = meaningful_lines(hosts_text);
-    let users = meaningful_lines(users_text);
-    let passwords = meaningful_lines(passwords_text);
+    let users = credential_lines(users_text);
+    let passwords = credential_lines(passwords_text);
 
     if hosts.is_empty() {
         bail!("hosts list contains no entries");
@@ -270,6 +289,7 @@ pub(crate) fn parse_lists(
         let server = normalize_server(host).with_context(|| format!("hosts line {}", line_no + 1))?;
         for (username, password) in users.iter().zip(passwords.iter()) {
             targets.push(CheckTarget {
+                input_index: 0,
                 server: server.clone(),
                 username: username.clone(),
                 password: password.clone(),
@@ -289,8 +309,18 @@ fn meaningful_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Credential lines keep a leading `#` because a password may legitimately start with one.
+fn credential_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn normalize_target(target: CheckTarget) -> Result<CheckTarget, String> {
     Ok(CheckTarget {
+        input_index: 0,
         server: normalize_server(&target.server).map_err(|error| error.to_string())?,
         username: target.username,
         password: target.password,
@@ -310,7 +340,14 @@ pub(crate) fn normalize_server(raw: &str) -> anyhow::Result<String> {
     {
         bail!("server address {server:?} contains whitespace or control characters");
     }
-    let destination = ironrdp_client::config::Destination::new(server.to_owned())
+    // Destination expects a bare IPv6 address or an explicit `[v6]:port`. Strip brackets
+    // from a portless literal so `[::1]` canonicalizes to `[::1]:3389` like `ip:port` does.
+    let bracketed_v6 = server
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .filter(|inner| inner.parse::<core::net::Ipv6Addr>().is_ok());
+    let address = bracketed_v6.unwrap_or(server);
+    let destination = ironrdp_client::config::Destination::new(address.to_owned())
         .map_err(|error| anyhow::anyhow!("invalid server address {server:?}: {error}"))?;
     Ok(destination.to_string())
 }
@@ -374,8 +411,8 @@ pub(crate) fn dedupe(targets: Vec<CheckTarget>, allow_multiple_passwords: bool) 
     })
 }
 
-/// Shuffles targets with a reproducible seed.
-pub(crate) fn shuffle(targets: &mut [CheckTarget], seed: u64) {
+/// Shuffles a slice with a reproducible seed.
+pub(crate) fn shuffle<T>(targets: &mut [T], seed: u64) {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     targets.shuffle(&mut rng);
 }
@@ -445,12 +482,14 @@ mod tests {
     fn dedupe_drops_exact_duplicates_and_refuses_multiple_passwords() {
         let targets = vec![
             CheckTarget {
+                input_index: 0,
                 server: "h:3389".into(),
                 username: "u".into(),
                 password: "p".into(),
                 domain: None,
             },
             CheckTarget {
+                input_index: 0,
                 server: "H:3389".into(),
                 username: "U".into(),
                 password: "p".into(),
@@ -463,12 +502,14 @@ mod tests {
 
         let conflicting = vec![
             CheckTarget {
+                input_index: 0,
                 server: "h:3389".into(),
                 username: "u".into(),
                 password: "p1".into(),
                 domain: None,
             },
             CheckTarget {
+                input_index: 0,
                 server: "h:3389".into(),
                 username: "u".into(),
                 password: "p2".into(),
@@ -494,22 +535,53 @@ mod tests {
     }
 
     #[test]
+    fn csv_rejects_junk_after_a_closing_quote() {
+        let error = parse_records("\"host\"evil,user,pass\n", InputFormat::Csv).expect_err("malformed csv");
+        assert!(error.to_string().contains("closing quote"));
+    }
+
+    #[test]
+    fn utf16be_is_decoded() {
+        let bytes: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain("h u p\n".encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(decode_text(bytes).expect("utf16be"), "h u p\n");
+    }
+
+    #[test]
+    fn credential_lines_keep_a_leading_hash() {
+        let targets = parse_lists("10.0.0.1\n", "alice\n", "#secret\n").expect("lists parse");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].password, "#secret");
+    }
+
+    #[test]
+    fn portless_bracketed_ipv6_is_normalized() {
+        let targets = parse_records("[::1] u p\n", InputFormat::Txt).expect("ipv6 literal");
+        assert_eq!(targets[0].server, "[::1]:3389");
+    }
+
+    #[test]
     fn shuffle_is_deterministic_for_a_seed() {
         let make = || {
             vec![
                 CheckTarget {
+                    input_index: 0,
                     server: "a:1".into(),
                     username: "u".into(),
                     password: "p".into(),
                     domain: None,
                 },
                 CheckTarget {
+                    input_index: 0,
                     server: "b:1".into(),
                     username: "u".into(),
                     password: "p".into(),
                     domain: None,
                 },
                 CheckTarget {
+                    input_index: 0,
                     server: "c:1".into(),
                     username: "u".into(),
                     password: "p".into(),

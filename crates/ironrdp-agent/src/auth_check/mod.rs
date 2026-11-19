@@ -50,18 +50,34 @@ pub(crate) async fn run_auth_check(args: AuthCheckArgs) -> anyhow::Result<()> {
         fatal("input contains no checks");
     }
 
+    for (position, target) in targets.iter_mut().enumerate() {
+        target.input_index = position;
+    }
+
     let seed = if single || args.no_shuffle {
         None
     } else {
         Some(args.seed.unwrap_or_else(input::entropy_seed))
     };
+    // Shuffle the execution order, not the targets: result `index` stays the input-order
+    // position even when the checks run in a randomized order.
+    let mut order: Vec<usize> = (0..targets.len()).collect();
     if let Some(seed) = seed {
-        input::shuffle(&mut targets, seed);
+        input::shuffle(&mut order, seed);
     }
+    let execution_plan: Vec<_> = order.iter().map(|&i| targets[i].clone()).collect();
 
     let system = performance::profile();
     if args.dry_run {
-        print_plan(&args, &targets, &prepared, system, seed);
+        let mut writer: Box<dyn std::io::Write> = match args.output.as_deref() {
+            Some(path) => Box::new(
+                std::fs::File::create(path)
+                    .unwrap_or_else(|error| fatal(format!("create {}: {error}", path.display()))),
+            ),
+            None => Box::new(std::io::stdout()),
+        };
+        print_plan(&mut writer, &args, &targets, &prepared, system, seed);
+        let _ = writer.flush();
         return Ok(());
     }
 
@@ -101,7 +117,7 @@ pub(crate) async fn run_auth_check(args: AuthCheckArgs) -> anyhow::Result<()> {
     );
     let pinned = args.concurrency > 0;
     let (start_limit, max_limit) = if pinned {
-        if args.concurrency > auto_max {
+        if !args.quiet && args.concurrency > auto_max {
             eprintln!(
                 "auth-check: warning: --concurrency {} is above the computed ceiling of {auto_max}",
                 args.concurrency
@@ -160,7 +176,7 @@ pub(crate) async fn run_auth_check(args: AuthCheckArgs) -> anyhow::Result<()> {
 
     let emitter = core::cell::RefCell::new(emitter);
     let outcome: RunOutcome = scheduler::run(
-        targets,
+        execution_plan,
         &resolved,
         &config,
         |result| emitter.borrow_mut().emit(result),
@@ -257,6 +273,7 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
         }
         Ok(RawInput {
             targets: vec![CheckTarget {
+                input_index: 0,
                 server: input::normalize_server(&server)?,
                 username,
                 password,
@@ -311,7 +328,7 @@ fn unique_host_count(targets: &[CheckTarget]) -> usize {
 
 /// Resolves every unique host up front, at most 32 lookups in flight, so DNS latency
 /// never occupies a check slot. Failures are omitted and surface as `unreachable`.
-async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<String, SocketAddr> {
+async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<String, Vec<SocketAddr>> {
     let mut hosts = Vec::new();
     let mut seen = HashSet::new();
     for target in targets {
@@ -331,7 +348,10 @@ async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<St
         tasks.spawn(async move {
             let _permit = permit;
             match tokio::time::timeout(timeout, tokio::net::lookup_host(&server)).await {
-                Ok(Ok(mut addresses)) => addresses.next().map(|address| (server.to_ascii_lowercase(), address)),
+                Ok(Ok(addresses)) => {
+                    let addresses: Vec<SocketAddr> = addresses.collect();
+                    (!addresses.is_empty()).then(|| (server.to_ascii_lowercase(), addresses))
+                }
                 _ => None,
             }
         });
@@ -347,6 +367,7 @@ async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<St
 }
 
 fn print_plan(
+    writer: &mut dyn std::io::Write,
     args: &AuthCheckArgs,
     targets: &[CheckTarget],
     prepared: &PreparedInput,
@@ -371,7 +392,8 @@ fn print_plan(
     match args.format {
         OutputFormat::Ndjson => {
             for (index, target) in targets.iter().enumerate() {
-                println!(
+                let _ = writeln!(
+                    writer,
                     "{}",
                     serde_json::json!({
                         "domain": target.domain,
@@ -382,7 +404,8 @@ fn print_plan(
                     })
                 );
             }
-            println!(
+            let _ = writeln!(
+                writer,
                 "{}",
                 serde_json::json!({
                     "concurrency": {"max": max_limit, "per_host": per_host, "start": start_limit},
@@ -400,7 +423,8 @@ fn print_plan(
         }
         OutputFormat::Json => {
             let target = &targets[0];
-            println!(
+            let _ = writeln!(
+                writer,
                 "{}",
                 serde_json::json!({
                     "domain": target.domain,
@@ -411,14 +435,16 @@ fn print_plan(
             );
         }
         OutputFormat::Human => {
-            println!(
+            let _ = writeln!(
+                writer,
                 "system: {} logical CPUs ({} physical cores), {} MiB memory, {}",
                 system.logical_cpus,
                 system.physical_cores,
                 system.total_memory_mb,
                 if system.elevated { "elevated" } else { "not elevated" }
             );
-            println!(
+            let _ = writeln!(
+                writer,
                 "plan: {} checks against {} hosts (concurrency {}..{}, per-host {})",
                 targets.len(),
                 unique_hosts,
@@ -427,26 +453,33 @@ fn print_plan(
                 per_host
             );
             if prepared.duplicates_dropped > 0 {
-                println!("duplicates dropped: {}", prepared.duplicates_dropped);
+                let _ = writeln!(writer, "duplicates dropped: {}", prepared.duplicates_dropped);
             }
             if !prepared.multiple_passwords.is_empty() {
-                println!(
+                let _ = writeln!(
+                    writer,
                     "accounts with multiple passwords: {}",
                     prepared.multiple_passwords.join(", ")
                 );
             }
             if let Some(seed) = seed {
-                println!("shuffle seed: {seed}");
+                let _ = writeln!(writer, "shuffle seed: {seed}");
             }
             for (index, target) in targets.iter().take(20).enumerate() {
                 let account = match &target.domain {
                     Some(domain) => format!("{domain}\\{}", target.username),
                     None => target.username.clone(),
                 };
-                println!("  [{}/{}] {account}@{}", index + 1, targets.len(), target.server);
+                let _ = writeln!(
+                    writer,
+                    "  [{}/{}] {account}@{}",
+                    index + 1,
+                    targets.len(),
+                    target.server
+                );
             }
             if targets.len() > 20 {
-                println!("  ... {} more", targets.len() - 20);
+                let _ = writeln!(writer, "  ... {} more", targets.len() - 20);
             }
         }
     }

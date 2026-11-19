@@ -131,13 +131,15 @@ impl Emitter {
                 *self.error_kinds.entry(kind.as_str()).or_default() += 1;
             }
         }
-        if !matches!(
-            result.status,
-            CheckStatus::Error {
-                kind: super::scheduler::ErrorKind::Timeout | super::scheduler::ErrorKind::HostDown,
-                ..
-            }
-        ) && self.latencies.len() < MAX_LATENCY_SAMPLES
+        if result.elapsed_ms > 0
+            && !matches!(
+                result.status,
+                CheckStatus::Error {
+                    kind: super::scheduler::ErrorKind::Timeout | super::scheduler::ErrorKind::HostDown,
+                    ..
+                }
+            )
+            && self.latencies.len() < MAX_LATENCY_SAMPLES
         {
             self.latencies
                 .push(u32::try_from(result.elapsed_ms).unwrap_or(u32::MAX));

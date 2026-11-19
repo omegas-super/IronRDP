@@ -14,8 +14,10 @@
 
 use core::net::SocketAddr;
 use core::panic::AssertUnwindSafe;
+use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::FutureExt as _;
@@ -73,14 +75,18 @@ pub(crate) enum CheckStatus {
 /// One completed check.
 #[derive(Debug)]
 pub(crate) struct CheckResult {
-    /// Input-order index (pre-shuffle).
+    /// Position in the original input, reported to consumers.
     pub(crate) index: usize,
+    /// Position in the execution plan, used for scheduler bookkeeping.
+    pub(crate) plan_index: usize,
     pub(crate) server: String,
     pub(crate) username: String,
     pub(crate) domain: Option<String>,
     pub(crate) status: CheckStatus,
     pub(crate) elapsed_ms: u64,
     pub(crate) attempts: u32,
+    /// Stage reached when a timeout ended the check.
+    pub(crate) timeout_stage: Option<CheckStage>,
 }
 
 /// Scheduler configuration.
@@ -118,7 +124,7 @@ const MIN_WINDOW_SAMPLES: u32 = 32;
 /// result and `on_window` after every controller evaluation.
 pub(crate) async fn run<F, W, S>(
     targets: Vec<CheckTarget>,
-    resolved: &HashMap<String, SocketAddr>,
+    resolved: &HashMap<String, Vec<SocketAddr>>,
     config: &SchedulerConfig,
     mut on_result: F,
     mut on_window: W,
@@ -140,6 +146,7 @@ where
     let mut hosts_down: HashSet<String> = HashSet::new();
     let mut last_start: HashMap<String, Instant> = HashMap::new();
     let mut delayed: Vec<(Instant, usize)> = Vec::new();
+    let mut progress_of: HashMap<usize, Arc<AtomicU8>> = HashMap::new();
     let mut attempts: Vec<u32> = vec![0; targets.len()];
     let mut in_flight = 0usize;
     let mut controller = LimitController::new(config.initial_limit, config.max_limit, config.pinned);
@@ -181,9 +188,13 @@ where
             &mut pacing_wake,
             &mut window,
             &mut on_result,
+            &attempts,
+            &mut progress_of,
         );
 
         let pacing_sleep = sleep_until_optional(pacing_wake);
+        let retry_wake = delayed.iter().map(|(at, _)| *at).min();
+        let retry_sleep = sleep_until_optional(retry_wake);
         let window_sleep = tokio::time::sleep(WINDOW_MAX_AGE.saturating_sub(window.age()));
 
         tokio::select! {
@@ -194,7 +205,7 @@ where
             }
             Some(result) = result_rx.recv() => {
                 in_flight = in_flight.saturating_sub(1);
-                if let Some(worker) = worker_of.remove(&result.index) {
+                if let Some(worker) = worker_of.remove(&result.plan_index) {
                     if let Some(slot) = workers.get_mut(worker) {
                         slot.outstanding = slot.outstanding.saturating_sub(1);
                     }
@@ -208,6 +219,7 @@ where
                     &mut deferred,
                     &mut ready,
                     &mut delayed,
+                    &mut progress_of,
                     &mut attempts,
                     &mut window,
                     &mut outcome,
@@ -216,23 +228,32 @@ where
             }
             _ = timer.tick() => {
                 promote_deferred(&mut ready, &mut deferred);
-                let bound = globally_bound(&targets, &ready, &host_in_flight, in_flight, controller.limit(), config.per_host);
-                if let Some(stats) = window.maybe_finish(bound, MIN_WINDOW_SAMPLES, WINDOW_MAX_AGE) {
-                    let change = controller.observe(&stats);
-                    outcome.final_limit = controller.limit();
-                    outcome.peak_limit = outcome.peak_limit.max(controller.limit());
-                    on_window(&stats, change, controller.limit());
-                }
+                evaluate_window(
+                    &targets,
+                    &ready,
+                    &host_in_flight,
+                    in_flight,
+                    config.per_host,
+                    &mut controller,
+                    &mut window,
+                    &mut outcome,
+                    &mut on_window,
+                );
             }
             _ = window_sleep, if !ready.is_empty() || in_flight > 0 => {
-                let bound = globally_bound(&targets, &ready, &host_in_flight, in_flight, controller.limit(), config.per_host);
-                if let Some(stats) = window.maybe_finish(bound, MIN_WINDOW_SAMPLES, WINDOW_MAX_AGE) {
-                    let change = controller.observe(&stats);
-                    outcome.final_limit = controller.limit();
-                    outcome.peak_limit = outcome.peak_limit.max(controller.limit());
-                    on_window(&stats, change, controller.limit());
-                }
+                evaluate_window(
+                    &targets,
+                    &ready,
+                    &host_in_flight,
+                    in_flight,
+                    config.per_host,
+                    &mut controller,
+                    &mut window,
+                    &mut outcome,
+                    &mut on_window,
+                );
             }
+            () = retry_sleep, if retry_wake.is_some() => {}
             () = pacing_sleep, if pacing_wake.is_some() => {
                 promote_deferred(&mut ready, &mut deferred);
             }
@@ -243,10 +264,39 @@ where
     outcome
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scheduler threads its state maps explicitly so the main loop stays borrow-checkable"
+)]
+fn evaluate_window<W>(
+    targets: &[CheckTarget],
+    ready: &VecDeque<usize>,
+    host_in_flight: &HashMap<String, usize>,
+    in_flight: usize,
+    per_host: usize,
+    controller: &mut LimitController,
+    window: &mut WindowAccumulator,
+    outcome: &mut RunOutcome,
+    on_window: &mut W,
+) where
+    W: FnMut(&WindowStats, LimitChange, usize),
+{
+    let bound = globally_bound(targets, ready, host_in_flight, in_flight, controller.limit(), per_host);
+    if let Some(stats) = window.maybe_finish(bound, MIN_WINDOW_SAMPLES, WINDOW_MAX_AGE) {
+        let change = controller.observe(&stats);
+        outcome.final_limit = controller.limit();
+        outcome.peak_limit = outcome.peak_limit.max(controller.limit());
+        on_window(&stats, change, controller.limit());
+    }
+}
+
 /// One check handed to a worker.
 struct WorkerJob {
     index: usize,
+    plan_index: usize,
+    attempt: u32,
     params: CredentialCheckParams,
+    progress: Arc<AtomicU8>,
     server: String,
     username: String,
     domain: Option<String>,
@@ -281,10 +331,10 @@ fn submit_job(workers: &mut [Worker], worker_of: &mut HashMap<usize, usize>, job
     let Some(slot) = workers.get_mut(worker) else {
         return false;
     };
-    let index = job.index;
+    let plan_index = job.plan_index;
     if slot.job_tx.send(job).is_ok() {
         slot.outstanding += 1;
-        worker_of.insert(index, worker);
+        worker_of.insert(plan_index, worker);
         true
     } else {
         false
@@ -300,10 +350,12 @@ fn worker_loop(
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
-            // Surface every queued job as an error instead of leaving the scheduler waiting.
-            while let Ok(job) = job_rx.try_recv() {
+            // A blocking recv keeps draining jobs until the scheduling side drops its
+            // senders, so no submitted job can be stranded when a worker cannot start.
+            while let Some(job) = job_rx.blocking_recv() {
                 let _ = result_tx.send(CheckResult {
                     index: job.index,
+                    plan_index: job.plan_index,
                     server: job.server,
                     username: job.username,
                     domain: job.domain,
@@ -313,7 +365,8 @@ fn worker_loop(
                         message: format!("check worker runtime failed: {error}"),
                     },
                     elapsed_ms: 0,
-                    attempts: 0,
+                    attempts: job.attempt,
+                    timeout_stage: None,
                 });
             }
             return;
@@ -342,20 +395,30 @@ fn worker_loop(
 async fn run_one(job: WorkerJob, timeout: Duration) -> CheckResult {
     let WorkerJob {
         index,
-        params,
+        plan_index,
+        attempt,
+        mut params,
+        progress,
         server,
         username,
         domain,
     } = job;
+    params.progress = Some(Arc::clone(&progress));
     let started = Instant::now();
     // A panicking check is reported as an internal error; the worker thread survives.
-    let outcome = match AssertUnwindSafe(tokio::time::timeout(timeout, Box::pin(check_credentials(params))))
+    let result = AssertUnwindSafe(tokio::time::timeout(timeout, Box::pin(check_credentials(params))))
         .catch_unwind()
-        .await
-    {
+        .await;
+    let reached_stage = CheckStage::from_code(progress.load(Ordering::Relaxed)).unwrap_or(CheckStage::Tcp);
+    let timeout_stage = if matches!(result, Ok(Err(_))) {
+        Some(reached_stage)
+    } else {
+        None
+    };
+    let outcome = match result {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_elapsed)) => CredentialCheckOutcome::Failed {
-            stage: CheckStage::Credssp,
+            stage: reached_stage,
             kind: FailureKind::Timeout,
             message: format!("check timed out after {timeout:?}"),
         },
@@ -368,12 +431,14 @@ async fn run_one(job: WorkerJob, timeout: Duration) -> CheckResult {
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     CheckResult {
         index,
+        plan_index,
         server,
         username,
         domain,
         status: classify(outcome),
         elapsed_ms,
-        attempts: 0,
+        attempts: attempt,
+        timeout_stage,
     }
 }
 
@@ -383,7 +448,7 @@ async fn run_one(job: WorkerJob, timeout: Duration) -> CheckResult {
 )]
 fn dispatch<F: FnMut(&CheckResult)>(
     targets: &[CheckTarget],
-    resolved: &HashMap<String, SocketAddr>,
+    resolved: &HashMap<String, Vec<SocketAddr>>,
     config: &SchedulerConfig,
     ready: &mut VecDeque<usize>,
     deferred: &mut HashMap<String, VecDeque<usize>>,
@@ -397,6 +462,8 @@ fn dispatch<F: FnMut(&CheckResult)>(
     pacing_wake: &mut Option<Instant>,
     window: &mut WindowAccumulator,
     on_result: &mut F,
+    attempts: &[u32],
+    progress_of: &mut HashMap<usize, Arc<AtomicU8>>,
 ) {
     let mut scan_budget = ready.len();
     while *in_flight < limit && scan_budget > 0 {
@@ -407,10 +474,13 @@ fn dispatch<F: FnMut(&CheckResult)>(
 
         let target = &targets[index];
         let host = target.server.to_ascii_lowercase();
+        let input_index = target.input_index;
+        let attempt = attempts[input_index] + 1;
 
         if hosts_down.contains(&host) {
             let result = CheckResult {
-                index,
+                index: input_index,
+                plan_index: index,
                 server: target.server.clone(),
                 username: target.username.clone(),
                 domain: target.domain.clone(),
@@ -420,7 +490,8 @@ fn dispatch<F: FnMut(&CheckResult)>(
                     message: String::from("host marked down after repeated connect failures"),
                 },
                 elapsed_ms: 0,
-                attempts: 0,
+                attempts: attempt,
+                timeout_stage: None,
             };
             window.record(&result);
             on_result(&result);
@@ -442,9 +513,10 @@ fn dispatch<F: FnMut(&CheckResult)>(
             }
         }
 
-        let Some(addr) = resolved.get(&host).copied() else {
+        let Some(addr) = resolved.get(&host).cloned() else {
             let result = CheckResult {
-                index,
+                index: input_index,
+                plan_index: index,
                 server: target.server.clone(),
                 username: target.username.clone(),
                 domain: target.domain.clone(),
@@ -454,7 +526,8 @@ fn dispatch<F: FnMut(&CheckResult)>(
                     message: String::from("host could not be resolved"),
                 },
                 elapsed_ms: 0,
-                attempts: 0,
+                attempts: attempt,
+                timeout_stage: None,
             };
             window.record(&result);
             on_result(&result);
@@ -467,12 +540,17 @@ fn dispatch<F: FnMut(&CheckResult)>(
         params.certificate_validation = config.certificate_validation;
         params.certificate_callback = config.certificate_callback.clone();
         params.connect_timeout = Some(config.connect_timeout);
-        params.resolved_addr = Some(addr);
+        params.resolved_addrs = addr;
         params.reset_on_close = config.reset_on_close;
 
+        let progress = Arc::new(AtomicU8::new(0));
+        progress_of.insert(input_index, Arc::clone(&progress));
         let job = WorkerJob {
-            index,
+            index: input_index,
+            plan_index: index,
+            attempt,
             params,
+            progress,
             server: target.server.clone(),
             username: target.username.clone(),
             domain: target.domain.clone(),
@@ -484,7 +562,8 @@ fn dispatch<F: FnMut(&CheckResult)>(
             last_start.insert(host, now);
         } else {
             let result = CheckResult {
-                index,
+                index: input_index,
+                plan_index: index,
                 server: target.server.clone(),
                 username: target.username.clone(),
                 domain: target.domain.clone(),
@@ -494,7 +573,8 @@ fn dispatch<F: FnMut(&CheckResult)>(
                     message: String::from("no check worker available"),
                 },
                 elapsed_ms: 0,
-                attempts: 0,
+                attempts: attempt,
+                timeout_stage: None,
             };
             window.record(&result);
             on_result(&result);
@@ -515,6 +595,7 @@ fn handle_result<F: FnMut(&CheckResult)>(
     deferred: &mut HashMap<String, VecDeque<usize>>,
     ready: &mut VecDeque<usize>,
     delayed: &mut Vec<(Instant, usize)>,
+    progress_of: &mut HashMap<usize, Arc<AtomicU8>>,
     attempts: &mut [u32],
     window: &mut WindowAccumulator,
     outcome: &mut RunOutcome,
@@ -525,27 +606,9 @@ fn handle_result<F: FnMut(&CheckResult)>(
         *count = count.saturating_sub(1);
     }
 
-    match &result.status {
-        CheckStatus::Error {
-            kind: ErrorKind::Unreachable,
-            stage: Some(CheckStage::Resolve | CheckStage::Tcp),
-            ..
-        } => {
-            let failures = host_failures.entry(host.clone()).or_default();
-            *failures += 1;
-            if *failures >= CONSECUTIVE_CONNECT_FAILURES_BEFORE_DOWN {
-                hosts_down.insert(host.clone());
-            }
-        }
-        CheckStatus::Error { .. } => {}
-        _ => {
-            host_failures.remove(&host);
-        }
-    }
-
     let attempt = attempts[result.index] + 1;
     let retryable = config.retries > 0
-        && attempts[result.index] < config.retries
+        && attempt < config.retries
         && matches!(
             result.status,
             CheckStatus::Error {
@@ -555,15 +618,35 @@ fn handle_result<F: FnMut(&CheckResult)>(
         );
 
     if retryable {
-        attempts[result.index] += 1;
+        attempts[result.index] = attempt;
         outcome.retried += 1;
-        let backoff = Duration::from_millis(250u64 << u32::min(attempts[result.index], 4));
-        delayed.push((Instant::now() + backoff, result.index));
+        let backoff = Duration::from_millis(250u64 << u32::min(attempt, 4));
+        delayed.push((Instant::now() + backoff, result.plan_index));
     } else {
+        // Only final results feed the circuit breaker: a connectivity failure that is
+        // about to be retried must not mark the whole host down.
+        match &result.status {
+            CheckStatus::Error {
+                kind: ErrorKind::Unreachable,
+                stage: Some(CheckStage::Resolve | CheckStage::Tcp),
+                ..
+            } => {
+                let failures = host_failures.entry(host.clone()).or_default();
+                *failures += 1;
+                if *failures >= CONSECUTIVE_CONNECT_FAILURES_BEFORE_DOWN {
+                    hosts_down.insert(host.clone());
+                }
+            }
+            CheckStatus::Error { .. } => {}
+            _ => {
+                host_failures.remove(&host);
+            }
+        }
         result.attempts = attempt;
         window.record(&result);
         on_result(&result);
     }
+    progress_of.remove(&result.index);
 
     if let Some(queue) = deferred.get_mut(&host) {
         if let Some(index) = queue.pop_front() {
@@ -609,7 +692,7 @@ fn globally_bound(
     if in_flight < limit || ready.is_empty() {
         return false;
     }
-    ready.iter().take(64).any(|index| {
+    ready.iter().any(|index| {
         let host = targets[*index].server.to_ascii_lowercase();
         host_in_flight.get(&host).copied().unwrap_or(0) < per_host
     })
@@ -672,20 +755,24 @@ impl WindowAccumulator {
             CheckStatus::Error {
                 kind: ErrorKind::Timeout,
                 ..
-            } => self.post_connect_stalls += 1,
+            } if !matches!(result.timeout_stage, Some(CheckStage::Resolve | CheckStage::Tcp)) => {
+                self.post_connect_stalls += 1
+            }
             CheckStatus::Error {
                 kind: ErrorKind::LocalSocket,
                 ..
             } => self.local_socket_errors += 1,
             _ => {}
         }
-        if !matches!(
-            result.status,
-            CheckStatus::Error {
-                kind: ErrorKind::Timeout | ErrorKind::HostDown,
-                ..
-            }
-        ) {
+        if result.elapsed_ms > 0
+            && !matches!(
+                result.status,
+                CheckStatus::Error {
+                    kind: ErrorKind::Timeout | ErrorKind::HostDown,
+                    ..
+                }
+            )
+        {
             self.latencies_ms
                 .push(u32::try_from(result.elapsed_ms).unwrap_or(u32::MAX));
         }
@@ -721,4 +808,76 @@ fn median(values: &mut [u32]) -> Option<u32> {
     }
     values.sort_unstable();
     Some(values[values.len() / 2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_result(
+        kind: ErrorKind,
+        stage: Option<CheckStage>,
+        elapsed_ms: u64,
+        timeout_stage: Option<CheckStage>,
+    ) -> CheckResult {
+        CheckResult {
+            index: 0,
+            plan_index: 0,
+            server: "h:3389".into(),
+            username: "u".into(),
+            domain: None,
+            status: CheckStatus::Error {
+                kind,
+                stage,
+                message: String::new(),
+            },
+            elapsed_ms,
+            attempts: 1,
+            timeout_stage,
+        }
+    }
+
+    #[test]
+    fn connect_stage_timeouts_do_not_shrink_concurrency() {
+        let mut window = WindowAccumulator::new();
+        for _ in 0..10 {
+            window.record(&error_result(
+                ErrorKind::Timeout,
+                Some(CheckStage::Tcp),
+                5000,
+                Some(CheckStage::Tcp),
+            ));
+        }
+        let stats = window.maybe_finish(false, 1, Duration::ZERO).expect("window");
+        assert_eq!(
+            stats.post_connect_stalls, 0,
+            "a SYN blackhole is not a post-connect stall"
+        );
+    }
+
+    #[test]
+    fn post_connect_timeouts_still_shrink_concurrency() {
+        let mut window = WindowAccumulator::new();
+        window.record(&error_result(
+            ErrorKind::Timeout,
+            Some(CheckStage::Credssp),
+            5000,
+            Some(CheckStage::Credssp),
+        ));
+        let stats = window.maybe_finish(false, 1, Duration::ZERO).expect("window");
+        assert_eq!(stats.post_connect_stalls, 1);
+    }
+
+    #[test]
+    fn synthetic_zero_duration_results_are_not_latency_samples() {
+        let mut window = WindowAccumulator::new();
+        window.record(&error_result(
+            ErrorKind::Unreachable,
+            Some(CheckStage::Resolve),
+            0,
+            None,
+        ));
+        let stats = window.maybe_finish(false, 1, Duration::ZERO).expect("window");
+        assert_eq!(stats.p50_service_ms, None, "a failed resolve has no service time");
+    }
 }

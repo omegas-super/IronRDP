@@ -78,6 +78,13 @@ pub(crate) struct NetworkTuningReport {
 /// Raises the Windows dynamic TCP port range when elevated, so large fleets do not run
 /// out of ephemeral ports. Best effort: a failure is reported, never propagated.
 pub(crate) fn apply_network_tuning() -> NetworkTuningReport {
+    if std::env::var_os(DISABLE_ENV).is_some_and(|value| !value.is_empty()) {
+        return NetworkTuningReport {
+            applied: false,
+            detail: format!("TCP port tuning disabled by {DISABLE_ENV}"),
+        };
+    }
+
     #[cfg(windows)]
     {
         windows::apply_network_tuning()

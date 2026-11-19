@@ -7,7 +7,9 @@
 //! of a full connect.
 
 use core::net::SocketAddr;
+use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
+use std::sync::Arc;
 
 use ironrdp_connector::credssp::CredsspSequence;
 use ironrdp_connector::{ClientConnector, ConnectorError, ConnectorErrorKind};
@@ -29,6 +31,33 @@ pub enum CheckStage {
     X224,
     Tls,
     Credssp,
+}
+
+impl CheckStage {
+    /// Encodes the stage for a progress observer.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Resolve => 1,
+            Self::Tcp => 2,
+            Self::X224 => 3,
+            Self::Tls => 4,
+            Self::Credssp => 5,
+        }
+    }
+
+    /// Decodes a stage recorded by a progress observer.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Resolve),
+            2 => Some(Self::Tcp),
+            3 => Some(Self::X224),
+            4 => Some(Self::Tls),
+            5 => Some(Self::Credssp),
+            _ => None,
+        }
+    }
 }
 
 /// Classification of a failed check, used by retry and concurrency-control policies.
@@ -65,12 +94,15 @@ pub struct CredentialCheckParams {
     pub certificate_callback: Option<ironrdp_tls::CertificateValidationCallback>,
     /// TCP connect sub-deadline; [`DEFAULT_CONNECT_TIMEOUT`] when unset.
     pub connect_timeout: Option<Duration>,
-    /// Pre-resolved address; when set, DNS resolution is skipped and the hostname from
-    /// `server` is still used for SNI and certificate validation.
-    pub resolved_addr: Option<SocketAddr>,
+    /// Pre-resolved addresses tried in order; the hostname from `server` is still used for
+    /// SNI and certificate validation. Empty means resolve normally.
+    pub resolved_addrs: Vec<SocketAddr>,
     /// Close the connection abortively (SO_LINGER 0) so the local port is released
     /// immediately instead of lingering in TIME_WAIT.
     pub reset_on_close: bool,
+    /// Shared slot updated as the check advances, so a caller can separate a connect-stage
+    /// timeout from a stall after the TCP connection was established.
+    pub progress: Option<Arc<AtomicU8>>,
 }
 
 impl CredentialCheckParams {
@@ -86,8 +118,9 @@ impl CredentialCheckParams {
             certificate_validation: ironrdp_tls::CertificateValidation::Strict,
             certificate_callback: None,
             connect_timeout: None,
-            resolved_addr: None,
+            resolved_addrs: Vec::new(),
             reset_on_close: false,
+            progress: None,
         }
     }
 }
@@ -178,6 +211,9 @@ pub async fn check_credentials(params: CredentialCheckParams) -> CredentialCheck
     let mut framed = ironrdp_tokio::TokioFramed::new(stream);
     let mut connector = ClientConnector::new(config.connector, client_addr);
 
+    if let Some(progress) = &params.progress {
+        progress.store(CheckStage::X224.code(), Ordering::Relaxed);
+    }
     let should_upgrade = match ironrdp_tokio::connect_begin(&mut framed, &mut connector).await {
         Ok(should_upgrade) => should_upgrade,
         Err(error) => {
@@ -190,6 +226,9 @@ pub async fn check_credentials(params: CredentialCheckParams) -> CredentialCheck
     };
 
     let (stream, leftover_bytes) = framed.into_inner();
+    if let Some(progress) = &params.progress {
+        progress.store(CheckStage::Tls.code(), Ordering::Relaxed);
+    }
     let tls_upgrade = match params.certificate_callback.clone() {
         Some(callback) => {
             ironrdp_tls::upgrade_with_certificate_validation_callback_for_endpoint(
@@ -236,6 +275,9 @@ pub async fn check_credentials(params: CredentialCheckParams) -> CredentialCheck
             "the server did not negotiate NLA; credentials cannot be verified without a full logon".to_owned(),
         );
     }
+    if let Some(progress) = &params.progress {
+        progress.store(CheckStage::Credssp.code(), Ordering::Relaxed);
+    }
 
     let sequence = match CredsspSequence::init_for_connector(&connector, (&destination).into(), server_public_key, None)
     {
@@ -278,20 +320,34 @@ type ConnectFailure = (CheckStage, FailureKind, String);
 async fn connect(params: &CredentialCheckParams) -> Result<tokio::net::TcpStream, ConnectFailure> {
     let timeout = params.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
 
-    match params.resolved_addr {
-        Some(addr) => match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-            Ok(Ok(stream)) => Ok(stream),
-            Ok(Err(error)) => Err(classify_connect_error(error, params)),
-            Err(_) => Err((
-                CheckStage::Tcp,
-                FailureKind::Timeout,
-                format!("connect to {addr} timed out after {timeout:?}"),
-            )),
-        },
-        None => connect_tcp(&params.server, Some(timeout))
+    if params.resolved_addrs.is_empty() {
+        return connect_tcp(&params.server, Some(timeout))
             .await
-            .map_err(|error| classify_connect_error(error, params)),
+            .map_err(|error| classify_connect_error(error, params));
     }
+
+    let mut last_error = None;
+    for addr in &params.resolved_addrs {
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(*addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => last_error = Some(classify_connect_error(error, params)),
+            Err(_) => {
+                last_error = Some((
+                    CheckStage::Tcp,
+                    FailureKind::Timeout,
+                    format!("connect to {addr} timed out after {timeout:?}"),
+                ));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        (
+            CheckStage::Resolve,
+            FailureKind::Unreachable,
+            format!("no address resolved for {}", params.server),
+        )
+    }))
 }
 
 fn classify_connect_error(error: std::io::Error, params: &CredentialCheckParams) -> ConnectFailure {
