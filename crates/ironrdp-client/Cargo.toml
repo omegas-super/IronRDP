@@ -142,6 +142,7 @@ ironrdp-rdpei = { path = "../ironrdp-rdpei", version = "0.3" } # public
 ironrdp-rdpeudp = { path = "../ironrdp-rdpeudp", version = "0.1", optional = true }
 ironrdp-rdpeudp-tokio = { path = "../ironrdp-rdpeudp-tokio", version = "0.2", optional = true }
 ironrdp-tls = { path = "../ironrdp-tls", version = "0.3" } # public
+socket2 = "0.5"
 ironrdp-tokio = { path = "../ironrdp-tokio", version = "0.12", features = ["reqwest"] }
 ironrdp-rdcleanpath = { path = "../ironrdp-rdcleanpath", version = "0.3" }
 ironrdp-vmconnect = { path = "../ironrdp-vmconnect", version = "0.2", optional = true }
