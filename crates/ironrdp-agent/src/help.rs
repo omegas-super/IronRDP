@@ -166,7 +166,8 @@ Override with `--endpoint <PATH-OR-PIPE>` on any subcommand.
                                  `--concurrency 0` (default) sizes and adapts the limit from the
                                  system profile; a positive value pins it. `--per-host` defaults to 8.
                                  `--dry-run` prints the normalized, shuffled execution plan
-                                 without connecting.
+                                 without connecting. `--progress` reports throughput and ETA on
+                                 stderr every five seconds.
                                  Exit codes: 0 all valid, 1 any rejected credentials, 2 any check or
                                  input error, 130 interrupted. The audit contract is one password per
                                  account you hold; `--allow-multiple-passwords` is an explicit override.
