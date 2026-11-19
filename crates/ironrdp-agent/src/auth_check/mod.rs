@@ -214,6 +214,9 @@ struct RawInput {
 }
 
 fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
+    // Environment-backed credential variables apply only when the command line selects the
+    // single-check mode. Otherwise a caller who has RDP_PASSWORD exported could never run a
+    // bulk audit without a flag conflict.
     let single_flags =
         args.server.is_some() || args.username.is_some() || args.password.is_some() || args.domain.is_some();
     let lists = args.hosts.is_some();
@@ -236,24 +239,27 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
     if single_flags {
         let server = args
             .server
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--server is required for a single check"))?;
+            .clone()
+            .or_else(|| std::env::var("RDP_HOSTNAME").ok())
+            .ok_or_else(|| anyhow::anyhow!("--server or RDP_HOSTNAME is required for a single check"))?;
         let username = args
             .username
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--username is required for a single check"))?;
+            .clone()
+            .or_else(|| std::env::var("RDP_USERNAME").ok())
+            .ok_or_else(|| anyhow::anyhow!("--username or RDP_USERNAME is required for a single check"))?;
         let password = args
             .password
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--password is required for a single check"))?;
+            .clone()
+            .or_else(|| std::env::var("RDP_PASSWORD").ok())
+            .ok_or_else(|| anyhow::anyhow!("--password or RDP_PASSWORD is required for a single check"))?;
         if username.trim().is_empty() {
             bail!("--username must not be empty");
         }
         Ok(RawInput {
             targets: vec![CheckTarget {
-                server: input::normalize_server(server)?,
-                username: username.to_owned(),
-                password: password.to_owned(),
+                server: input::normalize_server(&server)?,
+                username,
+                password,
                 domain: args.domain.clone().filter(|domain| !domain.trim().is_empty()),
             }],
             single: true,

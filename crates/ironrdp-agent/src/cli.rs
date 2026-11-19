@@ -627,13 +627,14 @@ enum RemoteGuardArg {
 #[derive(Args, Debug)]
 pub(crate) struct AuthCheckArgs {
     /// RDP server address (host[:port]); the port defaults to 3389. Single-check mode.
-    #[arg(long, value_name = "SERVER", env = "RDP_HOSTNAME")]
+    /// Falls back to RDP_HOSTNAME when no bulk input mode is selected.
+    #[arg(long, value_name = "SERVER")]
     pub(crate) server: Option<String>,
-    /// RDP account user name (single-check mode).
-    #[arg(short = 'u', long, env = "RDP_USERNAME")]
+    /// RDP account user name (single-check mode). Falls back to RDP_USERNAME.
+    #[arg(short = 'u', long)]
     pub(crate) username: Option<String>,
-    /// RDP account password (single-check mode).
-    #[arg(short = 'p', long, env = "RDP_PASSWORD", hide_env_values = true)]
+    /// RDP account password (single-check mode). Falls back to RDP_PASSWORD.
+    #[arg(short = 'p', long)]
     pub(crate) password: Option<String>,
     /// RDP account domain (single-check mode).
     #[arg(short = 'd', long)]

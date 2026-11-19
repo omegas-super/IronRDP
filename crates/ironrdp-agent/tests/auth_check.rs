@@ -135,11 +135,16 @@ fn records(server: SocketAddr, count: usize) -> String {
 }
 
 fn run(args: &[&str]) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ironrdp-agent"))
-        .arg("auth-check")
-        .args(args)
-        .output()
-        .expect("run ironrdp-agent")
+    run_with_env(args, &[])
+}
+
+fn run_with_env(args: &[&str], vars: &[(&str, &str)]) -> Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ironrdp-agent"));
+    command.arg("auth-check").args(args);
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    command.output().expect("run ironrdp-agent")
 }
 
 fn json_lines(output: &Output) -> Vec<Value> {
@@ -392,6 +397,51 @@ fn dry_run_prints_the_plan_without_connecting() {
     let summary = values.last().expect("plan summary");
     assert_eq!(summary["type"], "plan_summary");
     assert_eq!(summary["total"], 3);
+}
+
+#[test]
+fn ambient_rdp_credentials_do_not_break_bulk_mode() {
+    let server = TestServer::start(Behavior::CloseImmediately);
+    let input = temp_input("env", &records(server.addr, 3));
+    let output = run_with_env(
+        &[
+            "--input",
+            path_arg(&input),
+            "--format",
+            "ndjson",
+            "--no-shuffle",
+            "--no-tune-system",
+            "--concurrency",
+            "2",
+            "--per-host",
+            "2",
+            "--timeout-ms",
+            "1000",
+            "--connect-timeout-ms",
+            "1000",
+        ],
+        &[
+            ("RDP_HOSTNAME", "unreachable.invalid"),
+            ("RDP_USERNAME", "env-user"),
+            ("RDP_PASSWORD", "env-password"),
+        ],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let values = json_lines(&output);
+    let results: Vec<&Value> = values.iter().filter(|value| value["type"] == "result").collect();
+    assert_eq!(results.len(), 3, "bulk input wins over ambient credentials");
+    assert!(
+        results
+            .iter()
+            .all(|value| value["username"].as_str() != Some("env-user")),
+        "ambient credentials must not enter the bulk plan"
+    );
 }
 
 #[test]
