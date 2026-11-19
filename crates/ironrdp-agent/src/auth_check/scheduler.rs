@@ -231,6 +231,7 @@ where
                 evaluate_window(
                     &targets,
                     &ready,
+                    &deferred,
                     &host_in_flight,
                     in_flight,
                     config.per_host,
@@ -244,6 +245,7 @@ where
                 evaluate_window(
                     &targets,
                     &ready,
+                    &deferred,
                     &host_in_flight,
                     in_flight,
                     config.per_host,
@@ -271,6 +273,7 @@ where
 fn evaluate_window<W>(
     targets: &[CheckTarget],
     ready: &VecDeque<usize>,
+    deferred: &HashMap<String, VecDeque<usize>>,
     host_in_flight: &HashMap<String, usize>,
     in_flight: usize,
     per_host: usize,
@@ -281,7 +284,15 @@ fn evaluate_window<W>(
 ) where
     W: FnMut(&WindowStats, LimitChange, usize),
 {
-    let bound = globally_bound(targets, ready, host_in_flight, in_flight, controller.limit(), per_host);
+    let bound = globally_bound(
+        targets,
+        ready,
+        deferred,
+        host_in_flight,
+        in_flight,
+        controller.limit(),
+        per_host,
+    );
     if let Some(stats) = window.maybe_finish(bound, MIN_WINDOW_SAMPLES, WINDOW_MAX_AGE) {
         let change = controller.observe(&stats);
         outcome.final_limit = controller.limit();
@@ -684,18 +695,22 @@ fn promote_deferred(ready: &mut VecDeque<usize>, deferred: &mut HashMap<String, 
 fn globally_bound(
     targets: &[CheckTarget],
     ready: &VecDeque<usize>,
+    deferred: &HashMap<String, VecDeque<usize>>,
     host_in_flight: &HashMap<String, usize>,
     in_flight: usize,
     limit: usize,
     per_host: usize,
 ) -> bool {
-    if in_flight < limit || ready.is_empty() {
+    if in_flight < limit || (ready.is_empty() && !has_deferred_work(deferred)) {
         return false;
     }
-    ready.iter().any(|index| {
-        let host = targets[*index].server.to_ascii_lowercase();
+
+    let can_start = |index: usize| {
+        let host = targets[index].server.to_ascii_lowercase();
         host_in_flight.get(&host).copied().unwrap_or(0) < per_host
-    })
+    };
+
+    ready.iter().copied().any(can_start) || deferred.values().flat_map(|queue| queue.iter().copied()).any(can_start)
 }
 
 fn classify(outcome: CredentialCheckOutcome) -> CheckStatus {
@@ -853,6 +868,26 @@ mod tests {
             stats.post_connect_stalls, 0,
             "a SYN blackhole is not a post-connect stall"
         );
+    }
+
+    #[test]
+    fn globally_bound_counts_deferred_work() {
+        let targets = vec![CheckTarget {
+            input_index: 0,
+            server: "h:3389".into(),
+            username: "u".into(),
+            password: "p".into(),
+            domain: None,
+        }];
+        let ready = VecDeque::new();
+        let mut deferred = HashMap::new();
+        deferred.insert(String::from("h:3389"), VecDeque::from([0]));
+        let mut host_in_flight = HashMap::new();
+        host_in_flight.insert(String::from("h:3389"), 1);
+
+        assert!(globally_bound(&targets, &ready, &deferred, &host_in_flight, 4, 4, 2));
+        assert!(!globally_bound(&targets, &ready, &deferred, &host_in_flight, 3, 4, 2));
+        assert!(!globally_bound(&targets, &ready, &deferred, &host_in_flight, 4, 4, 1));
     }
 
     #[test]

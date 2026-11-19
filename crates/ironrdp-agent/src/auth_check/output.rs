@@ -268,6 +268,7 @@ impl Emitter {
 /// Spawns the periodic progress reporter (stderr, every 5 s).
 pub(crate) fn spawn_progress_reporter(progress: Arc<Progress>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let started = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
@@ -279,12 +280,34 @@ pub(crate) fn spawn_progress_reporter(progress: Arc<Progress>) -> tokio::task::J
             let invalid = progress.invalid.load(Ordering::Relaxed);
             let errors = progress.errors.load(Ordering::Relaxed);
             let limit = progress.limit.load(Ordering::Relaxed);
-            let _ = writeln!(
-                std::io::stderr(),
-                "progress: {completed}/{total} done ({valid} valid, {invalid} invalid, {errors} errors), concurrency limit {limit}"
-            );
+            let line = format_progress_line(completed, total, valid, invalid, errors, limit, started.elapsed());
+            let _ = writeln!(std::io::stderr(), "{line}");
+            if completed >= total {
+                break;
+            }
         }
     })
+}
+
+fn format_progress_line(
+    completed: usize,
+    total: usize,
+    valid: usize,
+    invalid: usize,
+    errors: usize,
+    limit: usize,
+    elapsed: Duration,
+) -> String {
+    let rate = checks_per_second(completed, elapsed);
+    let eta = if rate > 0.0 && completed < total {
+        let remaining = f64::from(u32::try_from(total - completed).unwrap_or(u32::MAX));
+        format!(", ETA {:.0}s", remaining / rate)
+    } else {
+        String::new()
+    };
+    format!(
+        "progress: {completed}/{total} done ({valid} valid, {invalid} invalid, {errors} errors), {rate:.1}/s{eta}, concurrency limit {limit}"
+    )
 }
 
 fn checks_per_second(completed: usize, elapsed: Duration) -> f64 {
@@ -463,4 +486,32 @@ fn summary_line(summary: &Summary) -> String {
         line.push_str("; cancelled");
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_line_reports_rate_and_eta() {
+        let line = format_progress_line(25, 100, 20, 4, 1, 16, Duration::from_secs(5));
+        assert_eq!(
+            line,
+            "progress: 25/100 done (20 valid, 4 invalid, 1 errors), 5.0/s, ETA 15s, concurrency limit 16"
+        );
+    }
+
+    #[test]
+    fn progress_line_handles_zero_elapsed_and_completed_run() {
+        let line = format_progress_line(0, 10, 0, 0, 0, 4, Duration::ZERO);
+        assert_eq!(
+            line,
+            "progress: 0/10 done (0 valid, 0 invalid, 0 errors), 0.0/s, concurrency limit 4"
+        );
+        let line = format_progress_line(10, 10, 10, 0, 0, 4, Duration::from_secs(2));
+        assert_eq!(
+            line,
+            "progress: 10/10 done (10 valid, 0 invalid, 0 errors), 5.0/s, concurrency limit 4"
+        );
+    }
 }

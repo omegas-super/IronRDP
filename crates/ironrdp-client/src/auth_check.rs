@@ -3,8 +3,8 @@
 //! Runs the RDP connection sequence only as far as NLA — TCP, X.224 negotiation, the
 //! TLS handshake, and the CredSSP exchange — and stops there. Nothing after
 //! authentication runs (no MCS, licensing, activation, or channel setup), so a check
-//! costs the protocol minimum of about seven round trips instead of the roughly fifteen
-//! of a full connect.
+//! costs roughly six to eight network round trips depending on the TLS and CredSSP
+//! exchange, instead of the roughly fifteen of a full connect.
 
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU8, Ordering};

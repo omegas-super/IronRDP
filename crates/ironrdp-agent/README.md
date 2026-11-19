@@ -81,7 +81,7 @@ Passwords supplied to `connect` travel through IPC rather than child process arg
 
 ## Bulk credential checks
 
-`auth-check` verifies credentials by running only TCP, X.224, TLS, and CredSSP/NLA, then stops before MCS and session setup. Each check costs about seven round trips instead of the roughly fifteen a full connect needs, and no RDP session opens.
+`auth-check` verifies credentials by running only TCP, X.224, TLS, and CredSSP/NLA, then stops before MCS and session setup. Each check costs roughly six to eight network round trips depending on the TLS and CredSSP exchange, instead of the roughly fifteen a full connect needs, and no RDP session opens.
 
 Four mutually exclusive input modes are available:
 

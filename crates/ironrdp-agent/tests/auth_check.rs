@@ -400,6 +400,51 @@ fn dry_run_prints_the_plan_without_connecting() {
 }
 
 #[test]
+fn dry_run_shows_the_execution_order_and_keeps_input_indices() {
+    let server: SocketAddr = "127.0.0.1:3389".parse().expect("fixed test address");
+    let input = temp_input("dry-shuffle", &records(server, 24));
+    let plan_indices = |seed: Option<&str>| {
+        let mut args = vec!["--input", path_arg(&input), "--format", "ndjson", "--dry-run"];
+        if let Some(seed) = seed {
+            args.extend_from_slice(&["--seed", seed]);
+        } else {
+            args.push("--no-shuffle");
+        }
+        let output = run(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        json_lines(&output)
+            .into_iter()
+            .filter(|value| value["type"] == "plan")
+            .map(|value| {
+                value["index"]
+                    .as_u64()
+                    .expect("plan index")
+                    .try_into()
+                    .expect("usize index")
+            })
+            .collect::<Vec<usize>>()
+    };
+
+    let input_order: Vec<usize> = (0..24).collect();
+    let no_shuffle = plan_indices(None);
+    assert_eq!(no_shuffle, input_order, "--no-shuffle keeps input order");
+
+    let first = plan_indices(Some("1"));
+    let second = plan_indices(Some("2"));
+    assert_ne!(first, input_order, "seed 1 changes the execution order");
+    assert_ne!(first, second, "different seeds produce different orders");
+
+    let mut sorted = first;
+    sorted.sort_unstable();
+    assert_eq!(sorted, input_order, "plan events keep original input indices");
+}
+
+#[test]
 fn ambient_rdp_credentials_do_not_break_bulk_mode() {
     let server = TestServer::start(Behavior::CloseImmediately);
     let input = temp_input("env", &records(server.addr, 3));

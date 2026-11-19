@@ -76,7 +76,7 @@ pub(crate) async fn run_auth_check(args: AuthCheckArgs) -> anyhow::Result<()> {
             ),
             None => Box::new(std::io::stdout()),
         };
-        print_plan(&mut writer, &args, &targets, &prepared, system, seed);
+        print_plan(&mut writer, &args, &execution_plan, &prepared, system, seed);
         let _ = writer.flush();
         return Ok(());
     }
@@ -391,13 +391,13 @@ fn print_plan(
 
     match args.format {
         OutputFormat::Ndjson => {
-            for (index, target) in targets.iter().enumerate() {
+            for target in targets {
                 let _ = writeln!(
                     writer,
                     "{}",
                     serde_json::json!({
                         "domain": target.domain,
-                        "index": index,
+                        "index": target.input_index,
                         "server": target.server,
                         "type": "plan",
                         "username": target.username,
