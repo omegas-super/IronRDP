@@ -79,6 +79,40 @@ Background daemon logs are written to `%LOCALAPPDATA%\ironrdp-agent\daemon.log` 
 The operational log is truncated as it reaches 2 MiB, including while the daemon is running.
 Passwords supplied to `connect` travel through IPC rather than child process arguments; the background daemon does not inherit the standard RDP and RD Gateway password environment variables.
 
+## Bulk credential checks
+
+`auth-check` verifies credentials by running only TCP, X.224, TLS, and CredSSP/NLA, then stops before MCS and session setup. Each check costs about seven round trips instead of the roughly fifteen a full connect needs, and no RDP session opens.
+
+Four mutually exclusive input modes are available:
+
+```powershell
+# Single check: flags or RDP_HOSTNAME / RDP_USERNAME / RDP_PASSWORD
+ironrdp-agent auth-check --server rdp.example.test:3389 -u alice -p '<password>'
+
+# Records: whitespace `server username password`, CSV, or JSONL
+ironrdp-agent auth-check --input fleet.csv --format ndjson --progress
+
+# Line-wise lists: each zipped (user, password) pair is checked against every host
+ironrdp-agent auth-check --hosts hosts.txt --users users.txt --passwords passwords.txt
+
+# JSONL stream from another process
+Get-Content fleet.jsonl | ironrdp-agent auth-check --input - --input-format jsonl
+```
+
+The `txt` layout requires exactly three whitespace-separated fields: `server username password`. Use CSV (`server,username,password[,domain]`, with quoted fields and an optional header) or JSONL (`{"server":"h","username":"u","password":"p","domain":null}`) for a domain. `--input-format` defaults to the file extension and must be given explicitly for standard input. Hosts may be `ip`, `ip:port`, or `[ipv6]:port`; the default port is 3389. Blank lines and lines starting with `#` are ignored, UTF-8 BOM and UTF-16 files are decoded, and exact duplicate checks are dropped.
+
+The checker audits credentials you hold. Users and passwords in list mode pair line by line; they are never crossed into all combinations. Two different passwords for the same account are refused unless `--allow-multiple-passwords` is passed. Passwords never appear in results, diagnostics, or the summary.
+
+`--format ndjson` is the stable machine contract. Each completed check emits one `result` object with `type`, `index`, `server`, `username`, `domain`, `result` (`valid`, `invalid`, or `error`), `kind`, `stage`, `nt_status`, `elapsed_ms`, `attempts`, and `message`; the final `summary` object adds counts, error kinds, unique hosts, hosts down, throughput, p50/p95, seed, version, effective flags, and concurrency. `--format json` is only valid for a single check, and `--output FILE` redirects the stream. Exit codes are 0 when all checks are valid, 1 when any credential is rejected, 2 for any input or check error, and 130 after Ctrl-C, with partial results flushed.
+
+Concurrency starts at `clamp(logical CPUs x 2, 4, 32)` and adapts in two-second windows. The ceiling is the smallest of 25 checks per physical core, one check per 32 MiB of installed memory, and eight checks per unique host, capped at 512. The controller grows after two bound windows with stable latency and shrinks on post-connect stalls or local socket errors. `--concurrency N` pins a fixed limit instead. Checks are spread over current-thread worker runtimes, capped at eight per host by `--per-host` and paced 10 ms apart per host. A host is marked down after three consecutive connect-stage failures, and only pre-authentication connectivity failures are retried with backoff; credentials and timeouts are never retried.
+
+On elevated Windows, a bulk run widens the dynamic TCP port range to 10,000 through 65,534 when the current range is below 40,000 ports. `--no-tune-system` skips this step. The main socket lever is `SO_LINGER(0)` on close, which prevents local TIME_WAIT accumulation: the default 16,384-port range allows about 136 connections per second from one local address and port before sockets sit in TIME_WAIT for the system timed-wait delay. An abortive close releases the port immediately at the cost of RST packets in the server's logs; `--graceful-close` opts out.
+
+TLS validation is strict by default and consults the pinned known-certificates store. `--skip-certificate-check` accepts any certificate, is vulnerable to on-path attacks, and is intended only for explicitly authorized test fleets. Prefer `cert trust` with an out-of-band-verified fingerprint.
+
+`--dry-run` prints the normalized and shuffled plan without connecting. `--seed` makes the order reproducible, `--no-shuffle` keeps input order, `--progress` reports throughput every five seconds on stderr, and `--quiet` suppresses per-result lines.
+
 ## Experimental Remote Credential Guard
 
 Build with `--features remote-guard`.

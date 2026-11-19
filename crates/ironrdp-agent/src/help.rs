@@ -152,6 +152,22 @@ Override with `--endpoint <PATH-OR-PIPE>` on any subcommand.
                                  `--username`/`--password` or `RDG_USERNAME`/`RDG_PASSWORD`,
                                  falling back to `RDP_USERNAME`/`RDP_PASSWORD`.
                                  The listener defaults to `127.0.0.1`; do not expose unauthenticated SOCKS5 to untrusted networks.
+- `auth-check [--server H[:PORT] -u USER -p PASS [-d DOMAIN] | --input FILE | --hosts FILE --users FILE --passwords FILE] [--format human|json|ndjson] [flags]`
+                                 Verify credentials by running only TCP, X.224, TLS, and CredSSP/NLA;
+                                 no RDP session opens and no daemon is used. Exactly one input mode is
+                                 required: single-check flags, `--input FILE` (or `-` for stdin), or
+                                 the three line-wise list files. `--input-format txt|csv|jsonl` defaults
+                                 to the file extension. Users and passwords in list mode pair line by
+                                 line, and every pair is checked against every host.
+                                 Output defaults to human lines. `--format ndjson` emits one typed
+                                 `result` event per check and a final `summary` event; `json` is only
+                                 valid for a single check. Passwords are never emitted.
+                                 `--concurrency 0` (default) sizes and adapts the limit from the
+                                 system profile; a positive value pins it. `--per-host` defaults to 8.
+                                 `--dry-run` prints the normalized plan without connecting.
+                                 Exit codes: 0 all valid, 1 any rejected credentials, 2 any check or
+                                 input error, 130 interrupted. The audit contract is one password per
+                                 account you hold; `--allow-multiple-passwords` is an explicit override.
 - `disconnect [--server HOST[:PORT]]`  Alias for `session disconnect`; the optional server
                                  must match the active destination before any disconnect occurs.
 - `logoff [--timeout-secs N]`    Alias for `session logoff`.

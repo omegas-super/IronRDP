@@ -543,14 +543,25 @@ struct NowStdinArgs {
     last: bool,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputFormat {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum OutputFormat {
     /// Human-readable metadata; raw stdout/stderr are written unchanged.
     Human,
     /// One JSON document for the reply or completed stream.
     Json,
     /// One JSON object per reply/event.
     Ndjson,
+}
+
+/// Record layout for `auth-check --input`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum InputFormat {
+    /// Whitespace-separated `server username password` per line.
+    Txt,
+    /// RFC 4180 subset: `server,username,password[,domain]`.
+    Csv,
+    /// One JSON object `{server, username, password, domain?}` per line.
+    Jsonl,
 }
 
 const MAX_JSON_STREAM_EVENTS: usize = 8 * 1024;
@@ -615,18 +626,78 @@ enum RemoteGuardArg {
 /// Arguments for the credential-only check subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct AuthCheckArgs {
-    /// RDP server address (host[:port]); the port defaults to 3389.
+    /// RDP server address (host[:port]); the port defaults to 3389. Single-check mode.
     #[arg(long, value_name = "SERVER", env = "RDP_HOSTNAME")]
-    pub(crate) server: String,
-    /// RDP account user name.
+    pub(crate) server: Option<String>,
+    /// RDP account user name (single-check mode).
     #[arg(short = 'u', long, env = "RDP_USERNAME")]
-    pub(crate) username: String,
-    /// RDP account password.
+    pub(crate) username: Option<String>,
+    /// RDP account password (single-check mode).
     #[arg(short = 'p', long, env = "RDP_PASSWORD", hide_env_values = true)]
-    pub(crate) password: String,
-    /// RDP account domain.
+    pub(crate) password: Option<String>,
+    /// RDP account domain (single-check mode).
     #[arg(short = 'd', long)]
     pub(crate) domain: Option<String>,
+    /// Read one record per line from this file, or `-` for standard input.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) input: Option<PathBuf>,
+    /// Record layout of --input; inferred from the file extension when omitted.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub(crate) input_format: Option<InputFormat>,
+    /// Hosts list, one `ip[:port]` per line (list mode).
+    #[arg(long, value_name = "FILE", requires_all = ["users", "passwords"])]
+    pub(crate) hosts: Option<PathBuf>,
+    /// User names, one per line, paired line-wise with --passwords.
+    #[arg(long, value_name = "FILE", requires = "hosts")]
+    pub(crate) users: Option<PathBuf>,
+    /// Passwords, one per line, paired line-wise with --users.
+    #[arg(long, value_name = "FILE", requires = "hosts")]
+    pub(crate) passwords: Option<PathBuf>,
+    /// Result format: human lines, one JSON document (single checks), or ndjson events.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+    /// Write the result stream to this file instead of standard output.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) output: Option<PathBuf>,
+    /// Concurrency limit; 0 derives it from the system profile and adapts it while running.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub(crate) concurrency: usize,
+    /// Maximum concurrent checks per server.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub(crate) per_host: usize,
+    /// Whole-attempt deadline in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 10_000)]
+    pub(crate) timeout_ms: u64,
+    /// TCP connect sub-deadline in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 5_000)]
+    pub(crate) connect_timeout_ms: u64,
+    /// Retries for pre-authentication failures only.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub(crate) retries: u32,
+    /// Deterministic shuffle seed; a random seed is generated and reported when omitted.
+    #[arg(long, value_name = "N")]
+    pub(crate) seed: Option<u64>,
+    /// Keep the input order instead of shuffling.
+    #[arg(long)]
+    pub(crate) no_shuffle: bool,
+    /// Print the parsed, normalized, and shuffled plan without connecting.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    /// Report progress on standard error every 5 seconds.
+    #[arg(long)]
+    pub(crate) progress: bool,
+    /// Suppress per-result and diagnostic lines (the summary is still reported).
+    #[arg(long)]
+    pub(crate) quiet: bool,
+    /// Do not widen the Windows dynamic TCP port range before a bulk run.
+    #[arg(long)]
+    pub(crate) no_tune_system: bool,
+    /// Close connections gracefully instead of abortively (no SO_LINGER 0).
+    #[arg(long)]
+    pub(crate) graceful_close: bool,
+    /// Allow several passwords for the same account (the checker audits credentials you hold).
+    #[arg(long)]
+    pub(crate) allow_multiple_passwords: bool,
     /// Accept any server certificate (development and testing only).
     #[arg(long)]
     pub(crate) skip_certificate_check: bool,
@@ -1101,6 +1172,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 | Command::GwForward(_)
                 | Command::Cert(_)
                 | Command::Connect(_)
+                | Command::AuthCheck(_)
         )
     {
         ensure_activex_backend(&endpoint).await?;
