@@ -13,10 +13,10 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-mod controller;
-mod input;
-mod output;
-mod scheduler;
+pub(crate) mod controller;
+pub(crate) mod input;
+pub(crate) mod output;
+pub(crate) mod scheduler;
 
 use core::net::SocketAddr;
 use core::time::Duration;
@@ -235,7 +235,7 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
     // bulk audit without a flag conflict.
     let single_flags =
         args.server.is_some() || args.username.is_some() || args.password.is_some() || args.domain.is_some();
-    let lists = args.hosts.is_some();
+    let lists = args.hosts.is_some() || args.domains.is_some();
     let records = args.input.is_some();
 
     let modes = usize::from(single_flags) + usize::from(lists) + usize::from(records);
@@ -250,6 +250,12 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
     }
     if args.input_format.is_some() && !records {
         bail!("--input-format requires --input");
+    }
+    if args.domains.is_some() && args.users.is_none() {
+        bail!("--users is required with --domains");
+    }
+    if args.domains.is_some() && args.passwords.is_none() {
+        bail!("--passwords is required with --domains");
     }
 
     if single_flags {
@@ -288,7 +294,10 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
         let targets = input::parse_records(&text, format)?;
         Ok(RawInput { targets, single: false })
     } else {
-        let hosts = args.hosts.as_deref().expect("lists mode implies --hosts");
+        let hosts = args
+            .hosts
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--hosts is required for list mode"))?;
         let users = args
             .users
             .as_deref()
@@ -300,7 +309,8 @@ fn build_targets(args: &AuthCheckArgs) -> anyhow::Result<RawInput> {
         let hosts_text = input::read_text(hosts)?;
         let users_text = input::read_text(users)?;
         let passwords_text = input::read_text(passwords)?;
-        let targets = input::parse_lists(&hosts_text, &users_text, &passwords_text)?;
+        let domains_text = args.domains.as_deref().map(input::read_text).transpose()?;
+        let targets = input::parse_lists(&hosts_text, &users_text, &passwords_text, domains_text.as_deref())?;
         Ok(RawInput { targets, single: false })
     }
 }
@@ -318,7 +328,7 @@ fn infer_format(path: &Path) -> InputFormat {
     }
 }
 
-fn unique_host_count(targets: &[CheckTarget]) -> usize {
+pub(crate) fn unique_host_count(targets: &[CheckTarget]) -> usize {
     let mut hosts = HashSet::new();
     for target in targets {
         hosts.insert(target.server.to_ascii_lowercase());
@@ -328,7 +338,7 @@ fn unique_host_count(targets: &[CheckTarget]) -> usize {
 
 /// Resolves every unique host up front, at most 32 lookups in flight, so DNS latency
 /// never occupies a check slot. Failures are omitted and surface as `unreachable`.
-async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<String, Vec<SocketAddr>> {
+pub(crate) async fn resolve_hosts(targets: &[CheckTarget], timeout: Duration) -> HashMap<String, Vec<SocketAddr>> {
     let mut hosts = Vec::new();
     let mut seen = HashSet::new();
     for target in targets {
@@ -485,7 +495,7 @@ fn print_plan(
     }
 }
 
-fn certificate_policy(
+pub(crate) fn certificate_policy(
     skip_certificate_check: bool,
 ) -> anyhow::Result<(CertificateValidation, Option<CertificateValidationCallback>)> {
     if skip_certificate_check {

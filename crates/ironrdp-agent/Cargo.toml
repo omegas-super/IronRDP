@@ -19,6 +19,11 @@ name = "ironrdp-agent"
 path = "src/main.rs"
 test = false
 
+[[bin]]
+name = "swastik-rdp"
+path = "src/swastik-rdp.rs"
+test = false
+
 [features]
 remote-guard = ["ironrdp-daemon/remote-guard"]
 

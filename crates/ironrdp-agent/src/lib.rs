@@ -5,6 +5,7 @@
 //! A CLI-driven agentic RDP client.
 
 pub mod cli;
+pub mod swastik;
 
 pub(crate) mod attach;
 pub(crate) mod auth_check;

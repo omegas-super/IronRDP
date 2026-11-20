@@ -265,10 +265,12 @@ pub(crate) fn parse_lists(
     hosts_text: &str,
     users_text: &str,
     passwords_text: &str,
+    domains_text: Option<&str>,
 ) -> anyhow::Result<Vec<CheckTarget>> {
     let hosts = meaningful_lines(hosts_text);
     let users = credential_lines(users_text);
     let passwords = credential_lines(passwords_text);
+    let domains = domains_text.map(domain_lines);
 
     if hosts.is_empty() {
         bail!("hosts list contains no entries");
@@ -283,17 +285,30 @@ pub(crate) fn parse_lists(
             passwords.len()
         );
     }
+    if let Some(ref domains) = domains {
+        if domains.len() != users.len() {
+            bail!(
+                "domains list has {} entries but users list has {}; supply exactly one domain per user (blank lines mean no domain)",
+                domains.len(),
+                users.len()
+            );
+        }
+    }
 
     let mut targets = Vec::with_capacity(hosts.len() * users.len());
     for (line_no, host) in hosts.iter().enumerate() {
         let server = normalize_server(host).with_context(|| format!("hosts line {}", line_no + 1))?;
-        for (username, password) in users.iter().zip(passwords.iter()) {
+        for (index, (username, password)) in users.iter().zip(passwords.iter()).enumerate() {
             targets.push(CheckTarget {
                 input_index: 0,
                 server: server.clone(),
                 username: username.clone(),
                 password: password.clone(),
-                domain: None,
+                domain: domains
+                    .as_ref()
+                    .and_then(|list| list.get(index))
+                    .filter(|domain| !domain.is_empty())
+                    .cloned(),
             });
         }
     }
@@ -307,6 +322,11 @@ fn meaningful_lines(text: &str) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_owned)
         .collect()
+}
+
+/// Domain lines preserve blank entries so a domain file can be zipped line-wise with users.
+fn domain_lines(text: &str) -> Vec<String> {
+    text.lines().map(|line| line.trim().to_owned()).collect()
 }
 
 /// Credential lines keep a leading `#` because a password may legitimately start with one.
@@ -523,15 +543,27 @@ mod tests {
 
     #[test]
     fn lists_zip_users_with_passwords() {
-        let targets = parse_lists("10.0.0.1\n10.0.0.2:3391\n", "alice\nbob\n", "pw1\npw2\n").expect("lists parse");
+        let targets =
+            parse_lists("10.0.0.1\n10.0.0.2:3391\n", "alice\nbob\n", "pw1\npw2\n", None).expect("lists parse");
         assert_eq!(targets.len(), 4);
         assert_eq!(targets[0].username, "alice");
         assert_eq!(targets[0].password, "pw1");
         assert_eq!(targets[1].server, "10.0.0.1:3389");
         assert_eq!(targets[2].server, "10.0.0.2:3391");
 
-        let error = parse_lists("h\n", "a\nb\n", "p\n").expect_err("mismatched lengths");
+        let error = parse_lists("h\n", "a\nb\n", "p\n", None).expect_err("mismatched lengths");
         assert!(error.to_string().contains("paired line-wise"));
+    }
+
+    #[test]
+    fn lists_zip_domains_by_user_line() {
+        let targets = parse_lists("10.0.0.1\n", "alice\nbob\n", "pw1\npw2\n", Some("CORP\n\n")).expect("lists parse");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain.as_deref(), Some("CORP"));
+        assert_eq!(targets[1].domain, None);
+
+        let error = parse_lists("h\n", "a\nb\n", "p1\np2\n", Some("CORP\n")).expect_err("mismatched domain count");
+        assert!(error.to_string().contains("domains list has 1 entries"));
     }
 
     #[test]
@@ -551,7 +583,7 @@ mod tests {
 
     #[test]
     fn credential_lines_keep_a_leading_hash() {
-        let targets = parse_lists("10.0.0.1\n", "alice\n", "#secret\n").expect("lists parse");
+        let targets = parse_lists("10.0.0.1\n", "alice\n", "#secret\n", None).expect("lists parse");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].password, "#secret");
     }

@@ -58,7 +58,7 @@ impl ErrorKind {
 }
 
 /// Result classification for one check.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum CheckStatus {
     Valid,
     Invalid {
@@ -73,7 +73,7 @@ pub(crate) enum CheckStatus {
 }
 
 /// One completed check.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CheckResult {
     /// Position in the original input, reported to consumers.
     pub(crate) index: usize,

@@ -654,6 +654,9 @@ pub(crate) struct AuthCheckArgs {
     /// Passwords, one per line, paired line-wise with --users.
     #[arg(long, value_name = "FILE", requires = "hosts")]
     pub(crate) passwords: Option<PathBuf>,
+    /// Domains, one per line, paired line-wise with --users (blank means no domain).
+    #[arg(long, value_name = "FILE", requires = "hosts")]
+    pub(crate) domains: Option<PathBuf>,
     /// Result format: human lines, one JSON document (single checks), or ndjson events.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
