@@ -3341,7 +3341,7 @@ dependencies = [
  "ironrdp-session",
  "ironrdp-tls",
  "libc",
- "md-5 0.10.6",
+ "md-5 0.11.0",
  "png",
  "rand 0.9.5",
  "rfd",
