@@ -1,5 +1,5 @@
-//! `swastik-rdp`: an authorized credential-audit front end with terminal prompts and a
-//! built-in loopback GUI, both backed by the shared `auth-check` engine.
+//! `swastik-rdp`: an authorized credential-audit front end with a terminal mode and a
+//! native Windows GUI, both backed by the shared `auth-check` engine.
 //!
 //! Both front ends produce the same [`RunConfig`], run the same scheduler, and write the same
 //! structured reports. Credentials are read from operator-supplied files; there is no
@@ -11,23 +11,62 @@
 )]
 
 pub(crate) mod config;
-pub(crate) mod gui;
 pub(crate) mod report;
 pub(crate) mod run;
 
+#[cfg(windows)]
+mod native_gui;
+
 use clap::Parser as _;
+use std::io::IsTerminal as _;
 
 use self::config::Cli;
-use self::run::{execute, exit_code};
+use self::run::{cancellation_channel, execute, exit_code};
 
-/// Entry point used by `src/swastik-rdp.rs`.
+/// Handles the native GUI before a tokio runtime exists. The GUI owns its own runtime, so it
+/// must not be created or dropped inside an async context.
+pub fn run_gui() -> anyhow::Result<Option<u8>> {
+    let cli = Cli::parse();
+    let choose = !cli.gui() && !cli.has_mode_flags() && std::io::stdin().is_terminal();
+    if !(cli.gui() || (choose && launcher_choice()? == 1)) {
+        return Ok(None);
+    }
+    #[cfg(windows)]
+    {
+        native_gui::run()?;
+        Ok(Some(0))
+    }
+    #[cfg(not(windows))]
+    {
+        anyhow::bail!("the native GUI is available on Windows only")
+    }
+}
+
+/// Entry point used by `src/swastik-rdp.rs` after GUI mode has been ruled out.
 pub async fn run_cli() -> anyhow::Result<u8> {
     let cli = Cli::parse();
-    if cli.gui() {
-        gui::serve().await?;
+    let config = cli.into_config()?;
+    let (_controller, stop_rx) = cancellation_channel();
+    let (summary, _) = execute(config, None, stop_rx).await?;
+    Ok(exit_code(&summary))
+}
+
+/// Asks for the front end before any audit-specific prompts. `0` enters the terminal flow,
+/// `1` opens the native window. A bare non-interactive invocation stays in terminal mode so
+/// scripted use is unchanged.
+fn launcher_choice() -> anyhow::Result<u8> {
+    eprintln!("swastik-rdp:\n  0) CLI - terminal prompts\n  1) GUI - native window");
+    use std::io::{IsTerminal as _, Write as _};
+    let mut line = String::new();
+    eprint!("choose 0 or 1 [0]: ");
+    std::io::stderr().flush()?;
+    if !std::io::stdin().is_terminal() {
         return Ok(0);
     }
-    let config = cli.into_config()?;
-    let (summary, _) = execute(config, None).await?;
-    Ok(exit_code(&summary))
+    std::io::stdin().read_line(&mut line)?;
+    match line.trim() {
+        "" | "0" => Ok(0),
+        "1" => Ok(1),
+        other => anyhow::bail!("invalid launcher choice {other:?}; choose 0 or 1"),
+    }
 }

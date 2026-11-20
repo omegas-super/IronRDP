@@ -60,6 +60,14 @@ pub(crate) struct Progress {
 }
 
 impl Progress {
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self.state, label if label == RunState::Running.as_str() || label == RunState::Preparing.as_str())
+    }
+
+    pub(crate) fn average_pps(&self) -> f64 {
+        rate(self.completed, self.elapsed_ms)
+    }
+
     fn new(total: usize) -> Self {
         Self {
             state: RunState::Idle.as_str(),
@@ -74,6 +82,14 @@ impl Progress {
     }
 }
 
+fn rate(completed: usize, elapsed_ms: u64) -> f64 {
+    let seconds = f64::from(u32::try_from(elapsed_ms).unwrap_or(u32::MAX)) / 1000.0;
+    if seconds <= 0.0 {
+        return 0.0;
+    }
+    f64::from(u32::try_from(completed).unwrap_or(u32::MAX)) / seconds
+}
+
 /// A cheap cloneable handle to the shared progress snapshot.
 #[derive(Debug, Clone)]
 pub(crate) struct RunHandle {
@@ -82,8 +98,9 @@ pub(crate) struct RunHandle {
 }
 
 impl RunHandle {
-    pub(crate) fn subscribe(&self) -> watch::Receiver<Progress> {
-        self.tx.subscribe()
+    /// Returns the current snapshot without awaiting. Safe to call from a GUI frame.
+    pub(crate) fn snapshot(&self) -> Progress {
+        *self.tx.borrow()
     }
 
     fn publish(&self, mutate: impl FnOnce(&mut Progress)) {
@@ -101,6 +118,18 @@ impl Default for RunHandle {
             tx,
             started: Arc::new(Instant::now()),
         }
+    }
+}
+
+/// A cheap cloneable cancellation handle. It carries no credential data.
+#[derive(Debug, Clone)]
+pub(crate) struct RunController {
+    stop: watch::Sender<bool>,
+}
+
+impl RunController {
+    pub(crate) fn stop(&self) {
+        let _ = self.stop.send(true);
     }
 }
 
@@ -190,7 +219,11 @@ struct Prepared {
 ///
 /// `handle` is optional so the terminal path pays no synchronization cost. When present it
 /// is the only channel through which the browser learns about the run.
-pub(crate) async fn execute(config: RunConfig, handle: Option<RunHandle>) -> anyhow::Result<(Summary, RunHandle)> {
+pub(crate) async fn execute(
+    config: RunConfig,
+    handle: Option<RunHandle>,
+    stop_rx: watch::Receiver<bool>,
+) -> anyhow::Result<(Summary, RunHandle)> {
     let handle = handle.unwrap_or_else(|| RunHandle {
         tx: watch::channel(Progress::new(0)).0,
         started: Arc::new(Instant::now()),
@@ -199,7 +232,7 @@ pub(crate) async fn execute(config: RunConfig, handle: Option<RunHandle>) -> any
         progress.state = RunState::Preparing.as_str();
     });
 
-    let result = execute_inner(&config, &handle).await;
+    let result = execute_inner(&config, &handle, stop_rx).await;
     match &result {
         Ok((summary, _)) => handle.publish(|progress| {
             progress.state = if summary.cancelled {
@@ -218,7 +251,18 @@ pub(crate) async fn execute(config: RunConfig, handle: Option<RunHandle>) -> any
     result.map(|(summary, _)| (summary, handle))
 }
 
-async fn execute_inner(config: &RunConfig, handle: &RunHandle) -> anyhow::Result<(Summary, ())> {
+/// Creates a fresh cancellation channel. The caller keeps the controller and passes the
+/// receiver to [`execute`], so Stop is available before the first check starts.
+pub(crate) fn cancellation_channel() -> (RunController, watch::Receiver<bool>) {
+    let (stop_tx, stop_rx) = watch::channel(false);
+    (RunController { stop: stop_tx }, stop_rx)
+}
+
+async fn execute_inner(
+    config: &RunConfig,
+    handle: &RunHandle,
+    stop_rx: watch::Receiver<bool>,
+) -> anyhow::Result<(Summary, ())> {
     let targets = load_inputs(config)?;
     let (validation, callback) =
         certificate_policy(config.skip_certificate_check).context("load known certificates")?;
@@ -231,8 +275,7 @@ async fn execute_inner(config: &RunConfig, handle: &RunHandle) -> anyhow::Result
 
     let mut results = Vec::with_capacity(prepared.total);
     let progress = handle.clone();
-    let (stop_tx, stop_rx) = watch::channel(false);
-    // Ctrl+C is handled by the terminal entry point; the GUI uses `stop_rx` state changes.
+    // The GUI Stop button writes to the controller; terminal runs rely on Ctrl+C handling.
     let outcome = scheduler::run(
         prepared.targets,
         &prepared.resolved,
@@ -255,7 +298,6 @@ async fn execute_inner(config: &RunConfig, handle: &RunHandle) -> anyhow::Result
         },
     )
     .await;
-    drop(stop_tx);
 
     let elapsed_ms = u64::try_from(handle.started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let completed = results.len();

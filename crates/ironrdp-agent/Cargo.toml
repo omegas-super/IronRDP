@@ -60,6 +60,11 @@ tracing = "0.1"
 rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
+# Native audit GUI. Pinned to an eframe release compatible with the workspace MSRV.
+eframe = { version = "0.33.3", default-features = false, features = ["accesskit", "default_fonts", "wgpu"] }
+wgpu = { version = "27.0.1", default-features = false, features = ["dx12", "std", "wgsl"] }
+rfd = { version = "0.18", default-features = false }
+
 # Windows Sandbox control plane: gRPC/HTTP2 over a per-user named pipe.
 bytes = "1"
 h2 = "0.4"

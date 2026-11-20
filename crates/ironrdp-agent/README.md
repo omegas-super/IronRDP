@@ -115,7 +115,7 @@ TLS validation is strict by default and consults the pinned known-certificates s
 
 ## Swastik RDP front ends
 
-`swastik-rdp` wraps the same credential-check engine with an interactive terminal flow and a built-in browser interface. Both front ends use the same input files, profile definitions, scheduler, and report writer.
+`swastik-rdp` wraps the same credential-check engine with an interactive terminal flow and a native Windows GUI. Both front ends use the same input files, profile definitions, scheduler, and report writer. A bare interactive launch first asks `0` for CLI or `1` for GUI.
 
 ```powershell
 # Terminal prompts for every missing input, then runs the audit.
@@ -125,9 +125,11 @@ swastik-rdp
 swastik-rdp --hosts hosts.txt --users users.txt --passwords passwords.txt `
   --domains domains.txt --output-dir results --profile 0
 
-# Built-in local GUI at http://127.0.0.1:8765/.
+# Open the native window directly.
 swastik-rdp --gui
 ```
+
+The native window has Brute, Settings, and Work Files tabs. Brute shows state, active checks, current, average, and peak checks per second, good and bad counts, errors, remaining work, and elapsed time, with Start, Stop, and Clear controls. Settings exposes the five profiles and exact scheduler limits. Work Files selects host, user, password, and domain files through native file dialogs and reports each file's line count.
 
 The performance menu has five choices: `0` MAX pushes every safe limit to the machine-derived ceiling, `1` conservative uses minimal load, `2` balanced starts adaptively, `3` aggressive starts near the ceiling, and `4` custom asks for exact limits. MAX remains bounded by the spec-derived CPU, memory, and per-host limits. It never disables certificate validation or retries rejected credentials.
 
@@ -135,7 +137,7 @@ The input files are line-wise: hosts contain `ip[:port]`, users contain one name
 
 Each run writes four files into the output directory. `goods.txt` and `bad.txt` contain tab-separated server, username, password, domain, and elapsed time for valid and rejected credentials respectively. `errors.txt` records connection failures without passwords. `summary.ndjson` contains only counters and effective settings. All four files are written to temporary siblings and renamed only after every file succeeds, and an existing report is never overwritten.
 
-Passwords never reach standard output, standard error, the browser interface, or the summary file. The browser binds to loopback only and exposes counters and progress, never credentials.
+Passwords never reach standard output, standard error, the native GUI, or the summary file. The GUI holds only file paths and counters, never credential values.
 
 ## Experimental Remote Credential Guard
 

@@ -212,10 +212,10 @@ pub(crate) fn validate_output_dir(dir: &Path) -> anyhow::Result<()> {
 #[command(
     name = "swastik-rdp",
     version,
-    about = "Interactive RDP credential checker with a built-in local GUI"
+    about = "Interactive RDP credential checker with a native Windows GUI"
 )]
 pub(crate) struct Cli {
-    /// Start the built-in browser interface instead of terminal prompts.
+    /// Start the native Windows GUI instead of terminal prompts.
     #[arg(long)]
     gui: bool,
     /// Host/IP list, one `ip[:port]` per line.
@@ -271,6 +271,16 @@ pub(crate) struct Cli {
 impl Cli {
     pub(crate) fn gui(&self) -> bool {
         self.gui
+    }
+
+    /// True when the caller supplied any explicit input or mode flag; the launcher only
+    /// asks for a mode when the binary is started bare in a terminal.
+    pub(crate) fn has_mode_flags(&self) -> bool {
+        self.hosts.is_some()
+            || self.users.is_some()
+            || self.passwords.is_some()
+            || self.domains.is_some()
+            || self.profile.is_some()
     }
 
     /// Resolves flags first; missing items are only prompted for on an interactive terminal.
