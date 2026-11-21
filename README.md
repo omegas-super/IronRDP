@@ -63,8 +63,9 @@ Checksummed `.tar.gz` archives are attached to each GitHub release, one per supp
 
 - [`ironrdp-viewer`][ironrdp-viewer] - a windowed RDP client (tags `ironrdp-viewer-v*`)
 - [`ironrdp-agent`][ironrdp-agent] - a daemon-backed CLI for automation (tags `ironrdp-agent-v*`)
+- `swastik-rdp` - an authorized credential-audit front end with a native Windows GUI and terminal mode (tag `swastik-rdp-v*`), available from [this fork's releases][fork-releases]
 
-Each [release][releases] includes download, checksum, and extraction instructions.
+Each release includes download, checksum, and extraction instructions. The `swastik-rdp` Windows archive contains a self-contained executable and usage documentation.
 
 ### Install with Cargo
 
@@ -196,6 +197,7 @@ Licensed under either [MIT] or [Apache-2.0] at your option.
 [ironrdp-viewer]: ./crates/ironrdp-viewer
 [ironrdp-agent]: ./crates/ironrdp-agent
 [releases]: https://github.com/Devolutions/IronRDP/releases
+[fork-releases]: https://github.com/omegas-super/IronRDP/releases
 [viewer README]: ./crates/ironrdp-viewer/README.md
 [agent README]: ./crates/ironrdp-agent/README.md
 [docs.rs]: https://docs.rs/ironrdp/

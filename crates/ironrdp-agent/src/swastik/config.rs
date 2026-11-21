@@ -281,6 +281,16 @@ impl Cli {
             || self.passwords.is_some()
             || self.domains.is_some()
             || self.profile.is_some()
+            || self.concurrency != 0
+            || self.per_host != 8
+            || self.timeout_ms != 10_000
+            || self.connect_timeout_ms != 5_000
+            || self.retries != 0
+            || self.skip_certificate_check
+            || self.allow_multiple_passwords
+            || self.no_shuffle
+            || self.no_tune_system
+            || self.seed.is_some()
     }
 
     /// Resolves flags first; missing items are only prompted for on an interactive terminal.

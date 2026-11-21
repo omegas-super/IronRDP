@@ -8,8 +8,8 @@
 fn main() -> anyhow::Result<std::process::ExitCode> {
     // The native GUI owns a multi-thread tokio runtime and must be created before this
     // process enters an async context.
-    if let Some(code) = ironrdp_agent::swastik::run_gui()? {
-        return Ok(std::process::ExitCode::from(code));
+    if ironrdp_agent::swastik::run_gui()? {
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     run_cli()
 }

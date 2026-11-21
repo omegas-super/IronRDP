@@ -103,6 +103,11 @@ impl RunHandle {
         *self.tx.borrow()
     }
 
+    /// Subscribes to progress changes so a front end can repaint while a run is active.
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Progress> {
+        self.tx.subscribe()
+    }
+
     fn publish(&self, mutate: impl FnOnce(&mut Progress)) {
         self.tx.send_modify(|value| {
             mutate(value);
