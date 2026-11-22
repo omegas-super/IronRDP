@@ -218,6 +218,9 @@ pub(crate) struct Cli {
     /// Start the native Windows GUI instead of terminal prompts.
     #[arg(long)]
     gui: bool,
+    /// Skip the launcher and use terminal prompts even in an interactive terminal.
+    #[arg(long)]
+    no_gui: bool,
     /// Host/IP list, one `ip[:port]` per line.
     #[arg(long, value_name = "FILE")]
     hosts: Option<PathBuf>,
@@ -271,6 +274,10 @@ pub(crate) struct Cli {
 impl Cli {
     pub(crate) fn gui(&self) -> bool {
         self.gui
+    }
+
+    pub(crate) fn no_gui(&self) -> bool {
+        self.no_gui
     }
 
     /// True when the caller supplied any explicit input or mode flag; the launcher only

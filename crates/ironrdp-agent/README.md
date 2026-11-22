@@ -127,7 +127,12 @@ swastik-rdp --hosts hosts.txt --users users.txt --passwords passwords.txt `
 
 # Open the native window directly.
 swastik-rdp --gui
+
+# Skip the launcher and stay in the terminal flow.
+swastik-rdp --no-gui
 ```
+
+The native window selects the best available graphics adapter in this order: DX12, Vulkan, then OpenGL. On systems without a usable graphics adapter, use `--no-gui` or choose `0` at the launcher; the audit engine and reports do not depend on the native window. Windows Server 2012 and 2012 R2 do not include DX12, so the terminal flow is the supported path on those systems.
 
 The native window has Brute, Settings, and Work Files tabs. Brute shows state, active checks, current, average, and peak checks per second, good and bad counts, errors, remaining work, and elapsed time, with Start, Stop, and Clear controls. Settings exposes the five profiles and exact scheduler limits. Work Files selects host, user, password, and domain files through native file dialogs and reports each file's line count.
 

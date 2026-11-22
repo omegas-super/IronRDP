@@ -36,7 +36,7 @@ use self::run::{cancellation_channel, execute, exit_code};
 /// must not be created or dropped inside an async context.
 pub fn run_gui() -> anyhow::Result<bool> {
     let cli = cli();
-    let choose = !cli.gui() && !cli.has_mode_flags() && std::io::stdin().is_terminal();
+    let choose = !cli.gui() && !cli.no_gui() && !cli.has_mode_flags() && std::io::stdin().is_terminal();
     let open_gui = cli.gui() || (choose && launcher_choice()? == 1);
     CLI.with(|slot| *slot.borrow_mut() = Some(cli));
     if !open_gui {

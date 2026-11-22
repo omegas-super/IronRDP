@@ -439,15 +439,53 @@ fn count_file_lines(path: &str) -> std::io::Result<usize> {
 /// Launches the native window. Called from the `1` menu choice.
 pub(super) fn run() -> anyhow::Result<()> {
     let app = App::new()?;
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("swastik-rdp")
             .with_inner_size([900.0, 620.0])
             .with_min_inner_size([700.0, 460.0]),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
+    options.wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
+        instance_descriptor: wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            ..Default::default()
+        },
+        native_adapter_selector: Some(Arc::new(select_adapter)),
+        ..Default::default()
+    });
     eframe::run_native("swastik-rdp", options, Box::new(move |_cc| Ok(Box::new(app))))
         .map_err(|error| anyhow::anyhow!("native GUI failed: {error}"))
+}
+
+fn select_adapter(adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>) -> Result<wgpu::Adapter, String> {
+    let usable = |adapter: &wgpu::Adapter| surface.is_none_or(|surface| adapter.is_surface_supported(surface));
+    let rank = |adapter: &wgpu::Adapter| match adapter.get_info().backend {
+        wgpu::Backend::Dx12 => 0,
+        wgpu::Backend::Vulkan => 1,
+        wgpu::Backend::Gl => 2,
+        _ => 3,
+    };
+
+    adapters
+        .iter()
+        .filter(|adapter| usable(adapter))
+        .filter(|adapter| {
+            !matches!(
+                adapter.get_info().device_type,
+                wgpu::DeviceType::Cpu | wgpu::DeviceType::VirtualGpu
+            )
+        })
+        .min_by_key(|adapter| rank(adapter))
+        .or_else(|| {
+            adapters
+                .iter()
+                .filter(|adapter| usable(adapter))
+                .min_by_key(|adapter| rank(adapter))
+        })
+        .cloned()
+        .ok_or_else(|| "no compatible graphics adapter (tried DX12, Vulkan, and OpenGL)".to_owned())
 }
 
 #[cfg(test)]
