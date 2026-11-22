@@ -1,0 +1,102 @@
+name: Release swastik-rdp binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build binaries for (e.g. swastik-rdp-v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: short
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  select-release:
+    name: Select swastik-rdp release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.select.outputs.tag }}
+      version: ${{ steps.select.outputs.version }}
+    steps:
+      - name: Match release tag
+        id: select
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          if [[ "$TAG_NAME" =~ ^swastik-rdp-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "tag=$TAG_NAME" >> "$GITHUB_OUTPUT"
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not a swastik-rdp release tag: $TAG_NAME"
+          fi
+
+  build-windows:
+    name: Build Windows x64 binary
+    needs: select-release
+    if: ${{ needs.select-release.outputs.tag != '' }}
+    runs-on: windows-2022
+    env:
+      TAG_NAME: ${{ needs.select-release.outputs.tag }}
+      VERSION: ${{ needs.select-release.outputs.version }}
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Install build dependencies
+        uses: ./.github/actions/install-build-deps
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Build swastik-rdp
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '-C target-feature=+crt-static'
+          rustup target add $env:TARGET
+          cargo build --locked --release --target $env:TARGET --package ironrdp-agent --bin swastik-rdp
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = Join-Path 'target' $env:TARGET 'release' 'swastik-rdp.exe'
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw "Missing built binary: $binary"
+          }
+
+          $assetDir = 'swastik-release-assets'
+          New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $assetDir 'swastik-rdp.exe')
+          Copy-Item -LiteralPath 'crates/ironrdp-agent/README.md' -Destination (Join-Path $assetDir 'README.md')
+
+          Push-Location $assetDir
+          $archive = "swastik-rdp-v$($env:VERSION)-windows-x64.zip"
+          Compress-Archive -Force -Path 'swastik-rdp.exe', 'README.md' -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -NoNewline -Encoding ascii "$archive.sha256"
+          Pop-Location
+
+          "ARCHIVE=$assetDir/$archive" >> $env:GITHUB_ENV
+          "CHECKSUM=$assetDir/$archive.sha256" >> $env:GITHUB_ENV
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          gh release upload $env:TAG_NAME $env:ARCHIVE $env:CHECKSUM --clobber
