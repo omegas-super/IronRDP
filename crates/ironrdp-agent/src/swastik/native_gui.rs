@@ -161,7 +161,7 @@ impl App {
                     repainter.request_repaint();
                 }
             });
-            if let Err(error) = execute(config, Some(progress), stop_rx).await {
+            if let Err(error) = execute(config, Some(progress), stop_rx, None).await {
                 let message = format!("{error:#}");
                 eprintln!("swastik-rdp GUI run failed: {message}");
                 if let Ok(mut slot) = error_slot.lock() {

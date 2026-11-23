@@ -57,8 +57,42 @@ pub fn run_gui() -> anyhow::Result<bool> {
 pub async fn run_cli() -> anyhow::Result<u8> {
     let config = cli().into_config()?;
     let (_controller, stop_rx) = cancellation_channel();
-    let (summary, _) = execute(config, None, stop_rx).await?;
+    let (summary, _) = execute(config, None, stop_rx, Some(&terminal_reporter)).await?;
     Ok(exit_code(&summary))
+}
+
+fn terminal_reporter(progress: &run::Progress, result: &crate::auth_check::scheduler::CheckResult) {
+    use std::time::Instant;
+
+    thread_local! {
+        static LAST_STAT: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    }
+
+    let status = status_label(&result.status);
+    eprintln!(
+        "swastik-rdp: [{}] {} {} {} ({})",
+        progress.completed, result.server, result.username, status, result.elapsed_ms
+    );
+    let due = LAST_STAT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let now = Instant::now();
+        let print = slot.is_none_or(|last| last.elapsed() >= core::time::Duration::from_secs(5));
+        if print {
+            *slot = Some(now);
+        }
+        print
+    });
+    if progress.completed.is_multiple_of(25) || due {
+        eprintln!(
+            "swastik-rdp: stats completed={}/{} good={} bad={} errors={} pps={:.1}",
+            progress.completed,
+            progress.total,
+            progress.valid,
+            progress.invalid,
+            progress.errors,
+            progress.average_pps()
+        );
+    }
 }
 
 /// Asks for the front end before any audit-specific prompts. `0` enters the terminal flow,
@@ -78,5 +112,41 @@ fn launcher_choice() -> anyhow::Result<u8> {
         "" | "0" => Ok(0),
         "1" => Ok(1),
         other => anyhow::bail!("invalid launcher choice {other:?}; choose 0 or 1"),
+    }
+}
+
+fn status_label(status: &crate::auth_check::scheduler::CheckStatus) -> String {
+    use crate::auth_check::scheduler::CheckStatus;
+
+    match status {
+        CheckStatus::Valid => "GOOD".to_owned(),
+        CheckStatus::Invalid { .. } => "BAD".to_owned(),
+        CheckStatus::Error { kind, .. } => format!("ERROR {}", kind.as_str()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth_check::scheduler::{CheckStatus, ErrorKind};
+
+    #[test]
+    fn terminal_status_labels_are_explicit() {
+        assert_eq!(status_label(&CheckStatus::Valid), "GOOD");
+        assert_eq!(
+            status_label(&CheckStatus::Invalid {
+                nt_status: None,
+                message: String::new(),
+            }),
+            "BAD"
+        );
+        assert_eq!(
+            status_label(&CheckStatus::Error {
+                kind: ErrorKind::Unreachable,
+                stage: None,
+                message: String::new(),
+            }),
+            "ERROR unreachable"
+        );
     }
 }

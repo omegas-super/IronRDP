@@ -22,6 +22,8 @@ use crate::auth_check::{certificate_policy, resolve_hosts, unique_host_count};
 use super::config::{RunConfig, load_inputs};
 use super::report::Summary;
 
+pub(crate) type ResultReporter = dyn Fn(&Progress, &scheduler::CheckResult) + Send + Sync;
+
 /// What the browser is allowed to see: counters and paths, never a credential or a record.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub(crate) enum RunState {
@@ -228,6 +230,7 @@ pub(crate) async fn execute(
     config: RunConfig,
     handle: Option<RunHandle>,
     stop_rx: watch::Receiver<bool>,
+    on_result: Option<&ResultReporter>,
 ) -> anyhow::Result<(Summary, RunHandle)> {
     let handle = handle.unwrap_or_else(|| RunHandle {
         tx: watch::channel(Progress::new(0)).0,
@@ -237,7 +240,7 @@ pub(crate) async fn execute(
         progress.state = RunState::Preparing.as_str();
     });
 
-    let result = execute_inner(&config, &handle, stop_rx).await;
+    let result = execute_inner(&config, &handle, stop_rx, on_result).await;
     match &result {
         Ok((summary, _)) => handle.publish(|progress| {
             progress.state = if summary.cancelled {
@@ -267,6 +270,7 @@ async fn execute_inner(
     config: &RunConfig,
     handle: &RunHandle,
     stop_rx: watch::Receiver<bool>,
+    on_result: Option<&ResultReporter>,
 ) -> anyhow::Result<(Summary, ())> {
     let targets = load_inputs(config)?;
     let (validation, callback) =
@@ -295,6 +299,9 @@ async fn execute_inner(
                     CheckStatus::Error { .. } => value.errors += 1,
                 }
             });
+            if let Some(report) = on_result {
+                report(&progress.snapshot(), result);
+            }
         },
         |_stats, _change, limit| progress.publish(|value| value.concurrency = limit),
         async move {
