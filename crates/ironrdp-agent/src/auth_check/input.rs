@@ -295,7 +295,8 @@ pub(crate) fn parse_lists(
         }
     }
 
-    let mut targets = Vec::with_capacity(hosts.len() * users.len());
+    let target_count = checked_target_count(hosts.len(), users.len())?;
+    let mut targets = Vec::with_capacity(target_count.min(65_536));
     for (line_no, host) in hosts.iter().enumerate() {
         let server = normalize_server(host).with_context(|| format!("hosts line {}", line_no + 1))?;
         for (index, (username, password)) in users.iter().zip(passwords.iter()).enumerate() {
@@ -314,6 +315,12 @@ pub(crate) fn parse_lists(
     }
 
     Ok(targets)
+}
+
+fn checked_target_count(hosts: usize, users: usize) -> anyhow::Result<usize> {
+    hosts
+        .checked_mul(users)
+        .ok_or_else(|| anyhow::anyhow!("credential plan is too large to address"))
 }
 
 fn meaningful_lines(text: &str) -> Vec<String> {
@@ -539,6 +546,12 @@ mod tests {
         assert!(dedupe(conflicting.clone(), false).is_err());
         let prepared = dedupe(conflicting, true).expect("override allowed");
         assert_eq!(prepared.multiple_passwords.len(), 1);
+    }
+
+    #[test]
+    fn checked_target_count_rejects_overflow() {
+        assert!(checked_target_count(usize::MAX, 2).is_err());
+        assert_eq!(checked_target_count(20_000, 1).unwrap(), 20_000);
     }
 
     #[test]
